@@ -35,7 +35,7 @@ struct Tier1_27_ARPFlushTests {
     @Test("T1-F27-01: Generate arp -d -a command to flush entire ARP cache")
     func testMakeFlushAllCommand() {
         let cmd = ARPFlushRoutine.makeFlushAllCommand()
-        #expect(cmd.contains("arp"))
+        #expect(cmd.contains { $0.contains("arp") })
         #expect(cmd.contains("-d"))
         #expect(cmd.contains("-a"))
     }

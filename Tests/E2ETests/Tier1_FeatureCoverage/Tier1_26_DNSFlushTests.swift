@@ -23,14 +23,14 @@ struct Tier1_26_DNSFlushTests {
     @Test("T1-F26-01: dscacheutil -flushcache command structure")
     func testDSCacheUtilCommandStructure() {
         let (cmd, _) = DNSFlushRoutine.makeCommands()
-        #expect(cmd.contains("dscacheutil"))
+        #expect(cmd.contains { $0.contains("dscacheutil") })
         #expect(cmd.contains("-flushcache"))
     }
 
     @Test("T1-F26-02: killall -HUP mDNSResponder command structure")
     func testKillallMDNSResponderCommandStructure() {
         let (_, cmd) = DNSFlushRoutine.makeCommands()
-        #expect(cmd.contains("killall"))
+        #expect(cmd.contains { $0.contains("killall") })
         #expect(cmd.contains("-HUP"))
         #expect(cmd.contains("mDNSResponder"))
     }

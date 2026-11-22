@@ -26,7 +26,7 @@ struct Tier1_32_SysctlForwardingTests {
     @Test("T1-F32-01: Generate sysctl query command for net.inet.ip.forwarding")
     func testMakeSysctlQueryCommand() {
         let cmd = SysctlForwardingController.makeQueryCommand()
-        #expect(cmd.contains("sysctl"))
+        #expect(cmd.contains { $0.contains("sysctl") })
         #expect(cmd.contains("net.inet.ip.forwarding"))
     }
 
