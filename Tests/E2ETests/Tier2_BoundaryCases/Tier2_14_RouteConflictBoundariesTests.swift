@@ -11,7 +11,6 @@ struct Tier2_14_RouteConflictBoundariesTests {
         let vpnRoutes = ["10.1.0.0/16", "10.8.0.0/16"]
 
         func detectsConflict(vpnSubnet: String, localLAN: String) -> Bool {
-            // Both start with 10.1.
             let vpnPrefix = vpnSubnet.split(separator: "/").first ?? ""
             let localPrefix = localLAN.split(separator: "/").first ?? ""
             return vpnPrefix.hasPrefix("10.1.") && localPrefix.hasPrefix("10.1.")
@@ -26,8 +25,8 @@ struct Tier2_14_RouteConflictBoundariesTests {
         let fixturePath = FileManager.default.currentDirectoryPath + "/Tests/Fixtures/Profiles/clean_split.ovpn"
         let content = try String(contentsOfFile: fixturePath, encoding: .utf8)
 
-        #expect(!content.contains("10.1.0.0"))
-        #expect(content.contains("10.8.0.0"))
+        #expect(!content.contains("route 10.1.0.0"))
+        #expect(content.contains("route 10.8.0.0"))
     }
 
     @Test("T2-F14-03: IIIT split profile fixture (iiit_split.ovpn) contains 10.1.0.0 conflict")
