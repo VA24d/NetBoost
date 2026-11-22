@@ -42,10 +42,10 @@ struct Tier1_28_DNSResetTests {
     }
 
     @Test("T1-F28-03: Execute DNS reset using MockProcessRunner and verify recording")
-    func testExecuteDNSResetMockRunner() throws {
+    func testExecuteDNSResetMockRunner() async throws {
         let runner = MockProcessRunner()
         let cmd = DNSOverrideManager.makeResetDNSCommand(service: "Wi-Fi")
-        _ = try runner.run(cmd[0], arguments: Array(cmd.dropFirst()))
+        _ = try await runner.run(cmd[0], arguments: Array(cmd.dropFirst()))
 
         #expect(runner.didExecute(commandContaining: "networksetup -setdnsservers Wi-Fi Empty"))
     }

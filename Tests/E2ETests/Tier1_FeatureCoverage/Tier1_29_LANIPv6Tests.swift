@@ -41,10 +41,10 @@ struct Tier1_29_LANIPv6Tests {
     }
 
     @Test("T1-F29-03: Execute IPv6 disable via MockProcessRunner and verify recording")
-    func testExecuteDisableIPv6MockRunner() throws {
+    func testExecuteDisableIPv6MockRunner() async throws {
         let runner = MockProcessRunner()
         let cmd = IPv6Manager.makeDisableIPv6Command(service: "USB 10/100 LAN")
-        _ = try runner.run(cmd[0], arguments: Array(cmd.dropFirst()))
+        _ = try await runner.run(cmd[0], arguments: Array(cmd.dropFirst()))
 
         #expect(runner.didExecute(commandContaining: "networksetup -setv6off USB 10/100 LAN"))
     }
