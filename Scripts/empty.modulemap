@@ -1,0 +1,1 @@
+// Empty modulemap overlay to suppress duplicate SwiftBridging module in CLT

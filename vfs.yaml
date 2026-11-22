@@ -1,0 +1,39 @@
+{
+  "version": 0,
+  "case-sensitive": "false",
+  "roots": [
+    {
+      "type": "directory",
+      "name": "/Library/Developer/CommandLineTools/usr/include/swift",
+      "contents": [
+        {
+          "type": "file",
+          "name": "module.modulemap",
+          "external-contents": "/Users/va/NetBoost/Scripts/empty.modulemap"
+        }
+      ]
+    },
+    {
+      "type": "directory",
+      "name": "/Library/Developer/CommandLineTools/Library/Developer/Frameworks/Testing.framework/Versions/Current/Modules/Testing.swiftcrossimport",
+      "contents": [
+        {
+          "type": "file",
+          "name": "Foundation.swiftoverlay",
+          "external-contents": "/Users/va/NetBoost/Scripts/empty.swiftoverlay"
+        }
+      ]
+    },
+    {
+      "type": "directory",
+      "name": "/Library/Developer/CommandLineTools/Library/Developer/Frameworks/Testing.framework/Modules/Testing.swiftcrossimport",
+      "contents": [
+        {
+          "type": "file",
+          "name": "Foundation.swiftoverlay",
+          "external-contents": "/Users/va/NetBoost/Scripts/empty.swiftoverlay"
+        }
+      ]
+    }
+  ]
+}
