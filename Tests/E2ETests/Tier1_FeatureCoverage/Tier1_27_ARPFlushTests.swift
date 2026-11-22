@@ -48,10 +48,10 @@ struct Tier1_27_ARPFlushTests {
     }
 
     @Test("T1-F27-03: Execute ARP flush using MockProcessRunner and verify recording")
-    func testExecuteARPFlushMockRunner() throws {
+    func testExecuteARPFlushMockRunner() async throws {
         let runner = MockProcessRunner()
         let cmd = ARPFlushRoutine.makeFlushAllCommand()
-        _ = try runner.run(cmd[0], arguments: Array(cmd.dropFirst()))
+        _ = try await runner.run(cmd[0], arguments: Array(cmd.dropFirst()))
 
         #expect(runner.didExecute(commandContaining: "arp -d -a"))
     }

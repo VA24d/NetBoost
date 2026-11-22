@@ -13,10 +13,10 @@ struct Tier1_26_DNSFlushTests {
             )
         }
 
-        static func execute(runner: MockProcessRunner) throws {
+        static func execute(runner: MockProcessRunner) async throws {
             let (cmd1, cmd2) = makeCommands()
-            _ = try runner.run(cmd1[0], arguments: Array(cmd1.dropFirst()))
-            _ = try runner.run(cmd2[0], arguments: Array(cmd2.dropFirst()))
+            _ = try await runner.run(cmd1[0], arguments: Array(cmd1.dropFirst()))
+            _ = try await runner.run(cmd2[0], arguments: Array(cmd2.dropFirst()))
         }
     }
 
@@ -36,18 +36,18 @@ struct Tier1_26_DNSFlushTests {
     }
 
     @Test("T1-F26-03: Execute DNS flush sequence using MockProcessRunner")
-    func testExecuteDNSFlushSequence() throws {
+    func testExecuteDNSFlushSequence() async throws {
         let runner = MockProcessRunner()
-        try DNSFlushRoutine.execute(runner: runner)
+        try await DNSFlushRoutine.execute(runner: runner)
 
         #expect(runner.didExecute(commandContaining: "dscacheutil -flushcache"))
         #expect(runner.didExecute(commandContaining: "killall -HUP mDNSResponder"))
     }
 
     @Test("T1-F26-04: Verify zero exit codes from both flush executions")
-    func testFlushExitCodesZero() throws {
+    func testFlushExitCodesZero() async throws {
         let runner = MockProcessRunner()
-        try DNSFlushRoutine.execute(runner: runner)
+        try await DNSFlushRoutine.execute(runner: runner)
 
         let cmds = runner.recordedCommands
         for c in cmds {
