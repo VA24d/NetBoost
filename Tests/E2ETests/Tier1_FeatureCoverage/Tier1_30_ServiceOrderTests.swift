@@ -105,10 +105,10 @@ struct Tier1_30_ServiceOrderTests {
     }
 
     @Test("T1-F30-05: Execute reorder services using MockProcessRunner and verify recording")
-    func testExecuteReorderMockRunner() throws {
+    func testExecuteReorderMockRunner() async throws {
         let runner = MockProcessRunner()
         let cmd = ServiceOrderManager.makeOrderNetworkServicesCommand(orderedServices: ["USB 10/100 LAN", "Wi-Fi"])
-        _ = try runner.run(cmd[0], arguments: Array(cmd.dropFirst()))
+        _ = try await runner.run(cmd[0], arguments: Array(cmd.dropFirst()))
 
         #expect(runner.didExecute(commandContaining: "networksetup -ordernetworkservices USB 10/100 LAN Wi-Fi"))
     }
