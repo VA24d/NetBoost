@@ -152,6 +152,27 @@ struct ModelTests {
         #expect(decodedTask.progress == 0.75)
     }
 
+    @Test("AcceleratorModels: DownloadChunkInfo totalBytes overflow protection and boundary handling")
+    func testDownloadChunkInfoOverflowProtection() {
+        // Int64.max boundary: rangeStart 0, rangeEnd Int64.max should not overflow/trap
+        let maxChunk = DownloadChunkInfo(id: 1, rangeStart: 0, rangeEnd: Int64.max, downloadedBytes: 0)
+        #expect(maxChunk.totalBytes == Int64.max)
+
+        // Inverted range: rangeEnd < rangeStart should yield totalBytes == 0
+        let invertedChunk = DownloadChunkInfo(id: 2, rangeStart: 100, rangeEnd: 50, downloadedBytes: 0)
+        #expect(invertedChunk.totalBytes == 0)
+        #expect(invertedChunk.progress == 0.0)
+
+        // Normal range: 0 to 9 is 10 bytes
+        let normalChunk = DownloadChunkInfo(id: 3, rangeStart: 0, rangeEnd: 9, downloadedBytes: 5)
+        #expect(normalChunk.totalBytes == 10)
+        #expect(normalChunk.progress == 0.5)
+
+        // Over-downloaded: progress capped at 1.0
+        let overChunk = DownloadChunkInfo(id: 4, rangeStart: 0, rangeEnd: 9, downloadedBytes: 15)
+        #expect(overChunk.progress == 1.0)
+    }
+
     @Test("DiagnosticModels: NetworkTelemetryReport, ProbeResult, and DetectedIssue JSON roundtrip")
     func testDiagnosticModelsRoundtrip() throws {
         let fixedDate = Date(timeIntervalSince1970: 1700000000)

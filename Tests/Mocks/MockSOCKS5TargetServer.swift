@@ -23,27 +23,19 @@ public final class MockSOCKS5TargetServer: @unchecked Sendable {
     private var bytesSent: Int = 0
 
     public var connectedClientEndpoints: [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        return clientEndpoints
+        lock.withLock { clientEndpoints }
     }
 
     public var receivedPayloads: [Data] {
-        lock.lock()
-        defer { lock.unlock() }
-        return payloads
+        lock.withLock { payloads }
     }
 
     public var totalBytesReceived: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return bytesReceived
+        lock.withLock { bytesReceived }
     }
 
     public var totalBytesSent: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return bytesSent
+        lock.withLock { bytesSent }
     }
 
     public init(mode: SOCKS5TargetMode = .rawEcho) {
@@ -51,20 +43,21 @@ public final class MockSOCKS5TargetServer: @unchecked Sendable {
     }
 
     public func resetMetrics() {
-        lock.lock()
-        defer { lock.unlock() }
-        clientEndpoints.removeAll()
-        payloads.removeAll()
-        bytesReceived = 0
-        bytesSent = 0
+        lock.withLock {
+            clientEndpoints.removeAll()
+            payloads.removeAll()
+            bytesReceived = 0
+            bytesSent = 0
+        }
     }
 
     public func start() async throws -> UInt16 {
         try await withCheckedThrowingContinuation { continuation in
-            lock.lock()
-            if isRunning {
-                let p = self.port
-                lock.unlock()
+            let alreadyRunningPort: UInt16? = lock.withLock {
+                if isRunning { return self.port }
+                return nil
+            }
+            if let p = alreadyRunningPort {
                 continuation.resume(returning: p)
                 return
             }
@@ -79,10 +72,10 @@ public final class MockSOCKS5TargetServer: @unchecked Sendable {
                     switch state {
                     case .ready:
                         if let assignedPort = listener.port?.rawValue {
-                            self.lock.lock()
-                            self.port = assignedPort
-                            self.isRunning = true
-                            self.lock.unlock()
+                            self.lock.withLock {
+                                self.port = assignedPort
+                                self.isRunning = true
+                            }
                             continuation.resume(returning: assignedPort)
                         } else {
                             continuation.resume(throwing: NSError(domain: "MockSOCKS5TargetServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to determine bound port"]))
@@ -99,40 +92,40 @@ public final class MockSOCKS5TargetServer: @unchecked Sendable {
                 }
 
                 listener.start(queue: .global())
-                lock.unlock()
             } catch {
-                lock.unlock()
                 continuation.resume(throwing: error)
             }
         }
     }
 
     public func stop() {
-        lock.lock()
-        defer { lock.unlock() }
+        let connsToCancel = lock.withLock { () -> [NWConnection] in
+            isRunning = false
+            listener?.cancel()
+            listener = nil
+            let conns = activeConnections
+            activeConnections.removeAll()
+            return conns
+        }
 
-        isRunning = false
-        listener?.cancel()
-        listener = nil
-
-        for conn in activeConnections {
+        for conn in connsToCancel {
             conn.cancel()
         }
-        activeConnections.removeAll()
     }
 
     private func handleNewConnection(_ connection: NWConnection) {
-        lock.lock()
-        guard isRunning else {
-            lock.unlock()
+        let shouldAccept = lock.withLock { () -> Bool in
+            guard isRunning else { return false }
+            activeConnections.append(connection)
+            let endpointDesc = "\(connection.endpoint)"
+            clientEndpoints.append(endpointDesc)
+            return true
+        }
+
+        guard shouldAccept else {
             connection.cancel()
             return
         }
-
-        activeConnections.append(connection)
-        let endpointDesc = "\(connection.endpoint)"
-        clientEndpoints.append(endpointDesc)
-        lock.unlock()
 
         connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let self = self, let connection = connection else { return }
@@ -150,27 +143,27 @@ public final class MockSOCKS5TargetServer: @unchecked Sendable {
     }
 
     private func removeConnection(_ connection: NWConnection) {
-        lock.lock()
-        defer { lock.unlock() }
-        activeConnections.removeAll(where: { $0 === connection })
+        lock.withLock {
+            activeConnections.removeAll(where: { $0 === connection })
+        }
     }
 
     private func receiveData(on connection: NWConnection) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self, weak connection] data, _, isComplete, error in
             guard let self = self, let connection = connection else { return }
 
-            if let error = error {
+            if error != nil {
                 connection.cancel()
                 self.removeConnection(connection)
                 return
             }
 
             if let data = data, !data.isEmpty {
-                self.lock.lock()
-                self.payloads.append(data)
-                self.bytesReceived += data.count
-                let currentMode = self.mode
-                self.lock.unlock()
+                let currentMode = self.lock.withLock { () -> SOCKS5TargetMode in
+                    self.payloads.append(data)
+                    self.bytesReceived += data.count
+                    return self.mode
+                }
 
                 self.sendResponse(for: data, on: connection, mode: currentMode)
             }
@@ -206,9 +199,9 @@ public final class MockSOCKS5TargetServer: @unchecked Sendable {
             }
         }
 
-        lock.lock()
-        bytesSent += responseData.count
-        lock.unlock()
+        lock.withLock {
+            bytesSent += responseData.count
+        }
 
         connection.send(content: responseData, completion: .contentProcessed { [weak self, weak connection] _ in
             if case .httpEcho = mode {

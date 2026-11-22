@@ -25,7 +25,10 @@ let package = Package(
         .testTarget(
             name: "NetBoostTests",
             dependencies: ["NetBoostCore"],
-            path: "Tests"
+            path: "Tests",
+            resources: [
+                .copy("Fixtures")
+            ]
         )
     ]
 )

@@ -50,9 +50,7 @@ public final class MockHTTPServer: @unchecked Sendable {
     private var requests: [CapturedHTTPRequest] = []
 
     public var recordedRequests: [CapturedHTTPRequest] {
-        lock.lock()
-        defer { lock.unlock() }
-        return requests
+        lock.withLock { requests }
     }
 
     public init(payload: Data? = nil) {
@@ -69,18 +67,17 @@ public final class MockHTTPServer: @unchecked Sendable {
     }
 
     public func resetRecordedRequests() {
-        lock.lock()
-        defer { lock.unlock() }
-        requests.removeAll()
+        lock.withLock { requests.removeAll() }
     }
 
     /// Starts the HTTP server on an ephemeral loopback port and returns the assigned port.
     public func start() async throws -> UInt16 {
         try await withCheckedThrowingContinuation { continuation in
-            lock.lock()
-            if isRunning {
-                let p = self.port
-                lock.unlock()
+            let alreadyRunningPort: UInt16? = lock.withLock {
+                if isRunning { return self.port }
+                return nil
+            }
+            if let p = alreadyRunningPort {
                 continuation.resume(returning: p)
                 return
             }
@@ -95,10 +92,10 @@ public final class MockHTTPServer: @unchecked Sendable {
                     switch state {
                     case .ready:
                         if let assignedPort = listener.port?.rawValue {
-                            self.lock.lock()
-                            self.port = assignedPort
-                            self.isRunning = true
-                            self.lock.unlock()
+                            self.lock.withLock {
+                                self.port = assignedPort
+                                self.isRunning = true
+                            }
                             continuation.resume(returning: assignedPort)
                         } else {
                             continuation.resume(throwing: NSError(domain: "MockHTTPServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to determine bound port"]))
@@ -115,9 +112,7 @@ public final class MockHTTPServer: @unchecked Sendable {
                 }
 
                 listener.start(queue: .global())
-                lock.unlock()
             } catch {
-                lock.unlock()
                 continuation.resume(throwing: error)
             }
         }
@@ -125,37 +120,33 @@ public final class MockHTTPServer: @unchecked Sendable {
 
     /// Stops the server and cancels all active connections.
     public func stop() {
-        lock.lock()
-        defer { lock.unlock() }
+        let connsToCancel = lock.withLock { () -> [NWConnection] in
+            isRunning = false
+            listener?.cancel()
+            listener = nil
+            let conns = activeConnections
+            activeConnections.removeAll()
+            return conns
+        }
 
-        isRunning = false
-        listener?.cancel()
-        listener = nil
-
-        for conn in activeConnections {
+        for conn in connsToCancel {
             conn.cancel()
         }
-        activeConnections.removeAll()
     }
 
     // MARK: - Connection Handling
 
     private func handleNewConnection(_ connection: NWConnection) {
-        lock.lock()
-        guard isRunning else {
-            lock.unlock()
+        let shouldAccept = lock.withLock { () -> Bool in
+            guard isRunning, !dropConnectionImmediately else { return false }
+            activeConnections.append(connection)
+            return true
+        }
+
+        guard shouldAccept else {
             connection.cancel()
             return
         }
-
-        if dropConnectionImmediately {
-            lock.unlock()
-            connection.cancel()
-            return
-        }
-
-        activeConnections.append(connection)
-        lock.unlock()
 
         connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let self = self, let connection = connection else { return }
@@ -173,9 +164,9 @@ public final class MockHTTPServer: @unchecked Sendable {
     }
 
     private func removeConnection(_ connection: NWConnection) {
-        lock.lock()
-        defer { lock.unlock() }
-        activeConnections.removeAll(where: { $0 === connection })
+        lock.withLock {
+            activeConnections.removeAll(where: { $0 === connection })
+        }
     }
 
     private func receiveNextBlock(on connection: NWConnection, accumulatedData: Data) {
@@ -247,15 +238,10 @@ public final class MockHTTPServer: @unchecked Sendable {
             timestamp: Date()
         )
 
-        lock.lock()
-        requests.append(captured)
-        let mode = captivePortalMode
-        let is500 = force500Error
-        let is416 = forceRange416
-        let dropAfter = dropConnectionAfterBytes
-        let noRanges = simulateNonRangeSupport
-        let currentPayload = payload
-        lock.unlock()
+        let (mode, is500, is416, dropAfter, noRanges, currentPayload) = lock.withLock { () -> (CaptivePortalMode, Bool, Bool, Int?, Bool, Data) in
+            requests.append(captured)
+            return (captivePortalMode, force500Error, forceRange416, dropConnectionAfterBytes, simulateNonRangeSupport, payload)
+        }
 
         // 1. Fault Injection: Force 500
         if is500 {

@@ -44,4 +44,42 @@ struct ShellCommandTests {
         }
         #expect(didCatchTimeout == true)
     }
+
+    @Test("Execute command with >128KB output (>64KB pipe buffer) does not deadlock")
+    func testLargeOutputExceedingPipeBufferDoesNotDeadlock() async throws {
+        let output = try await ShellCommand.run(
+            "python",
+            arguments: ["-c", "print('A' * 131072)"],
+            timeout: 5.0
+        )
+        #expect(output.succeeded == true)
+        #expect(output.exitCode == 0)
+        #expect(output.stdout.count >= 131072)
+        #expect(output.duration < 2.0)
+    }
+
+    @Test("Execute host ps -ax command with large output does not deadlock")
+    func testPsAxCommandDoesNotDeadlock() async throws {
+        let output = try await ShellCommand.run(
+            "/bin/ps",
+            arguments: ["-ax", "-o", "stat,command"],
+            timeout: 5.0
+        )
+        #expect(output.succeeded == true)
+        #expect(output.exitCode == 0)
+        #expect(output.stdout.count > 1000)
+    }
+
+    @Test("Execute command with >128KB stderr output does not deadlock")
+    func testLargeStderrDoesNotDeadlock() async throws {
+        let output = try await ShellCommand.run(
+            "python",
+            arguments: ["-c", "import sys; sys.stderr.write('E' * 131072)"],
+            timeout: 5.0
+        )
+        #expect(output.succeeded == true)
+        #expect(output.exitCode == 0)
+        #expect(output.stderr.count >= 131072)
+        #expect(output.duration < 2.0)
+    }
 }

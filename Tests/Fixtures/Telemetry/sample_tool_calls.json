@@ -1,0 +1,98 @@
+{
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "fix_mtu",
+        "description": "Adjust the network interface MTU to eliminate TLS fragmentation and packet drop issues.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "interface": {
+              "type": "string",
+              "description": "Network interface name or service, e.g. Wi-Fi, en0, en10"
+            },
+            "mtu": {
+              "type": "integer",
+              "description": "Target MTU value (e.g. 1280 for cellular hotspots, 1500 for standard ethernet)"
+            }
+          },
+          "required": ["interface", "mtu"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "flush_dns",
+        "description": "Flush local macOS DNS cache via dscacheutil and restart mDNSResponder.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "flush_arp",
+        "description": "Flush macOS ARP cache entries to resolve poisoned or stale gateway MAC addresses.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "disable_ipv6",
+        "description": "Disable unrouted IPv6 on local campus LAN to resolve 500ms Happy Eyeballs latency delay.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "service": {
+              "type": "string",
+              "description": "Network service name, e.g. Wi-Fi or USB 10/100 LAN"
+            }
+          },
+          "required": ["service"]
+        }
+      }
+    }
+  ],
+  "sample_tool_response": {
+    "id": "chatcmpl-ai-doctor-001",
+    "object": "chat.completion",
+    "created": 1700000000,
+    "model": "qwen2.5-coder-7b-instruct",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Analysis shows cellular hotspot MTU is causing TLS packet drops. Executing remediation.",
+          "tool_calls": [
+            {
+              "id": "call_mtu_001",
+              "type": "function",
+              "function": {
+                "name": "fix_mtu",
+                "arguments": "{\"interface\": \"Wi-Fi\", \"mtu\": 1280}"
+              }
+            },
+            {
+              "id": "call_dns_002",
+              "type": "function",
+              "function": {
+                "name": "flush_dns",
+                "arguments": "{}"
+              }
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ]
+  }
+}

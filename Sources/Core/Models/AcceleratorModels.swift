@@ -32,7 +32,10 @@ public struct DownloadChunkInfo: Codable, Sendable, Identifiable, Equatable {
     }
 
     public var totalBytes: Int64 {
-        max(0, rangeEnd - rangeStart + 1)
+        guard rangeEnd >= rangeStart else { return 0 }
+        let (diff, overflow) = rangeEnd.subtractingReportingOverflow(rangeStart)
+        guard !overflow else { return Int64.max }
+        return diff == Int64.max ? Int64.max : diff + 1
     }
 
     public var progress: Double {

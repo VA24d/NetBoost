@@ -1,0 +1,58 @@
+{
+  "timestamp": "2026-11-22T19:00:00Z",
+  "interfaces": [
+    {
+      "bsdName": "en10",
+      "displayName": "USB 10/100 LAN",
+      "ipAddresses": [
+        {
+          "address": "10.1.36.52",
+          "version": "v4",
+          "netmask": "255.255.252.0",
+          "prefixLength": 22
+        }
+      ],
+      "macAddress": "00:11:22:33:44:55",
+      "gateway": "10.1.36.1",
+      "mtu": 1500,
+      "isPrimary": true,
+      "isUp": true
+    },
+    {
+      "bsdName": "en0",
+      "displayName": "Wi-Fi",
+      "ipAddresses": [
+        {
+          "address": "172.20.10.2",
+          "version": "v4",
+          "netmask": "255.255.255.240",
+          "prefixLength": 28
+        }
+      ],
+      "macAddress": "a4:c3:f0:12:34:56",
+      "gateway": "172.20.10.1",
+      "mtu": 1280,
+      "isPrimary": false,
+      "isUp": true
+    }
+  ],
+  "gatewayRTT": 0.82,
+  "campusCoreRTT": 1.74,
+  "externalEndpointsRTT": {
+    "google.com": 14.8,
+    "claude.com": 33.6,
+    "turing.iiit.ac.in": 1.65
+  },
+  "captivePortalDetected": false,
+  "captivePortalStatus": "notDetected",
+  "activeIssues": [
+    {
+      "id": "A1B2C3D4-E5F6-7890-ABCD-EF1234567890",
+      "severity": "warning",
+      "title": "Suboptimal Wi-Fi MTU for Cellular Hotspot",
+      "description": "Interface en0 MTU is 1500 while connected to iPhone Personal Hotspot, causing potential TLS bad record mac errors.",
+      "recommendedFixAction": "networksetup -setMTU Wi-Fi 1280",
+      "automatedFixAvailable": true
+    }
+  ]
+}

@@ -73,23 +73,24 @@ public final class PrivilegeHelper: Sendable {
 
         let appleScript = "do shell script \"\(escapedScript)\" with administrator privileges"
 
-        do {
-            return try await ShellCommand.run(
-                "/usr/bin/osascript",
-                arguments: ["-e", appleScript],
-                timeout: timeout
-            )
-        } catch let error as ShellError {
-            switch error {
-            case .executionFailed(let code, _, let stderr):
-                if stderr.contains("User canceled") || code == 1 {
-                    throw PrivilegeError.elevationDenied
-                }
-                throw PrivilegeError.executionFailed(stderr)
-            default:
-                throw PrivilegeError.executionFailed(error.localizedDescription)
+        let output = try await ShellCommand.run(
+            "/usr/bin/osascript",
+            arguments: ["-e", appleScript],
+            timeout: timeout
+        )
+
+        return try handleElevationResult(output)
+    }
+
+    /// Evaluates the ShellOutput from an elevation attempt, throwing PrivilegeError if execution failed or elevation was denied.
+    static func handleElevationResult(_ output: ShellOutput) throws -> ShellOutput {
+        if !output.succeeded {
+            if output.stderr.contains("User canceled") || output.exitCode == 1 {
+                throw PrivilegeError.elevationDenied
             }
+            throw PrivilegeError.executionFailed(output.stderr)
         }
+        return output
     }
 
     /// Runs an action via the netboost-helper.sh script with root privileges.

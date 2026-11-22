@@ -88,11 +88,20 @@ public final class ShellCommand: Sendable {
 
         // Handle timeout using cooperative async task
         return try await withThrowingTaskGroup(of: ShellOutput.self) { group in
-            // Task 1: Wait for process termination and collect pipes
+            // Task 1: Wait for process termination and collect pipes concurrently
             group.addTask {
+                async let stdoutDataAsync = Task.detached {
+                    stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                }.value
+
+                async let stderrDataAsync = Task.detached {
+                    stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                }.value
+
                 process.waitUntilExit()
-                let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+
+                let stdoutData = await stdoutDataAsync
+                let stderrData = await stderrDataAsync
 
                 let stdoutStr = String(data: stdoutData, encoding: .utf8) ?? ""
                 let stderrStr = String(data: stderrData, encoding: .utf8) ?? ""
