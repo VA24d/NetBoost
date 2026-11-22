@@ -19,7 +19,7 @@ struct CrossFeature_ServiceOrderRoutePinningTests {
 
         for rawLine in lines {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("(") && line.contains(")") {
+            if line.hasPrefix("(") && line.dropFirst().first?.isNumber == true {
                 // Match "(1) USB 10/100 LAN"
                 if let closeParen = line.firstIndex(of: ")") {
                     let rankStr = line[line.index(after: line.startIndex)..<closeParen]
