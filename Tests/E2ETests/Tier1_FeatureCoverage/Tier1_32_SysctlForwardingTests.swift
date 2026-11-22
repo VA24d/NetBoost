@@ -45,10 +45,10 @@ struct Tier1_32_SysctlForwardingTests {
     }
 
     @Test("T1-F32-04: Execute enable forwarding via MockProcessRunner and verify recording")
-    func testExecuteEnableForwardingMockRunner() throws {
+    func testExecuteEnableForwardingMockRunner() async throws {
         let runner = MockProcessRunner()
         let cmd = SysctlForwardingController.makeEnableCommand()
-        _ = try runner.run(cmd[0], arguments: Array(cmd.dropFirst()))
+        _ = try await runner.run(cmd[0], arguments: Array(cmd.dropFirst()))
 
         #expect(runner.didExecute(commandContaining: "net.inet.ip.forwarding=1"))
     }

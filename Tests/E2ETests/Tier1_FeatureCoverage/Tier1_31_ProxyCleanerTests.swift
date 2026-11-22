@@ -55,15 +55,15 @@ struct Tier1_31_ProxyCleanerTests {
     }
 
     @Test("T1-F31-05: Execute proxy cleanup sequence using MockProcessRunner")
-    func testExecuteProxyCleanupMockRunner() throws {
+    func testExecuteProxyCleanupMockRunner() async throws {
         let runner = MockProcessRunner()
         let cmd1 = ProxySettingsManager.makeDisableAutoProxyCommand(service: "Wi-Fi")
         let cmd2 = ProxySettingsManager.makeDisableWebProxyCommand(service: "Wi-Fi")
         let cmd3 = ProxySettingsManager.makeDisableSecureWebProxyCommand(service: "Wi-Fi")
 
-        _ = try runner.run(cmd1[0], arguments: Array(cmd1.dropFirst()))
-        _ = try runner.run(cmd2[0], arguments: Array(cmd2.dropFirst()))
-        _ = try runner.run(cmd3[0], arguments: Array(cmd3.dropFirst()))
+        _ = try await runner.run(cmd1[0], arguments: Array(cmd1.dropFirst()))
+        _ = try await runner.run(cmd2[0], arguments: Array(cmd2.dropFirst()))
+        _ = try await runner.run(cmd3[0], arguments: Array(cmd3.dropFirst()))
 
         #expect(runner.didExecute(commandContaining: "networksetup -setautoproxystate Wi-Fi off"))
         #expect(runner.didExecute(commandContaining: "networksetup -setwebproxystate Wi-Fi off"))
