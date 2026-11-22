@@ -44,8 +44,11 @@ struct Tier1_45_DownloaderDoctorViewsTests {
     @Test("T1-F45-02: Segmented progress bars visualizer displays 8 chunk states")
     func testSegmentedChunkBars() {
         let vm = DownloaderDoctorViewModel()
-        let chunks = (0..<8).map { i in
-            DownloadChunkInfo(id: i, rangeStart: Int64(i * 100), rangeEnd: Int64((i + 1) * 100 - 1), downloadedBytes: 50)
+        var chunks: [DownloadChunkInfo] = []
+        for i in 0..<8 {
+            let start = Int64(i * 100)
+            let end = Int64((i + 1) * 100 - 1)
+            chunks.append(DownloadChunkInfo(id: i, rangeStart: start, rangeEnd: end, downloadedBytes: 50))
         }
         vm.setChunks(chunks)
 
