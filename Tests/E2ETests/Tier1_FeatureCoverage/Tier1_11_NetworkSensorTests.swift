@@ -90,19 +90,19 @@ struct Tier1_11_NetworkSensorTests {
     @Test("T1-F11-04: Stream path changes continuously via MockNetworkEnvironment")
     func testStreamPathChanges() async throws {
         let mockEnv = MockNetworkEnvironment()
-        var receivedStates: [NetworkEnvironmentState] = []
-
-        let task = Task {
+        let task = Task { () -> [NetworkEnvironmentState] in
+            var states: [NetworkEnvironmentState] = []
             for await state in mockEnv.makeStateStream() {
-                receivedStates.append(state)
-                if receivedStates.count >= 2 { break }
+                states.append(state)
+                if states.count >= 2 { break }
             }
+            return states
         }
 
         try await Task.sleep(nanoseconds: 10_000_000)
         mockEnv.transition(to: .defaultCellularHotspot)
 
-        _ = await task.result
+        let receivedStates = await task.value
         #expect(receivedStates.count >= 2)
         #expect(receivedStates.last?.isCellular == true)
     }

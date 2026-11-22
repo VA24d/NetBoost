@@ -40,11 +40,19 @@ struct Tier2_11_NetworkSensorBoundariesTests {
         let env = MockNetworkEnvironment(initialState: .disconnected)
         let stream = env.makeStateStream()
 
-        var receivedStates: [NetworkEnvironmentState] = []
+        actor StateCollector {
+            private(set) var states: [NetworkEnvironmentState] = []
+            func add(_ state: NetworkEnvironmentState) {
+                states.append(state)
+            }
+            var count: Int { states.count }
+        }
+        let collector = StateCollector()
+
         let collectorTask = Task {
             for await state in stream {
-                receivedStates.append(state)
-                if receivedStates.count >= 4 { break }
+                await collector.add(state)
+                if await collector.count >= 4 { break }
             }
         }
 
@@ -56,7 +64,8 @@ struct Tier2_11_NetworkSensorBoundariesTests {
         ], interval: 0.01)
 
         _ = await collectorTask.result
-        #expect(receivedStates.count >= 4)
+        let totalCount = await collector.count
+        #expect(totalCount >= 4)
     }
 
     @Test("T2-F11-03: All interfaces disconnected classifies as disconnected")
