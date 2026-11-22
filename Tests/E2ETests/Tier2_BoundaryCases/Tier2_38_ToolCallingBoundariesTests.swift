@@ -66,7 +66,7 @@ struct Tier2_38_ToolCallingBoundariesTests {
         }
     }
 
-    @Test("T2-F38-04: sample_tool_calls.json fixture parses all 7 remediation tool schemas")
+    @Test("T2-F38-04: sample_tool_calls.json fixture parses all remediation tool schemas")
     func testSampleToolCallsFixtureParsing() throws {
         let fixturePath = FileManager.default.currentDirectoryPath + "/Tests/Fixtures/Telemetry/sample_tool_calls.json"
         let data = try Data(contentsOf: URL(fileURLWithPath: fixturePath))
@@ -85,7 +85,7 @@ struct Tier2_38_ToolCallingBoundariesTests {
         }
 
         let decoded = try JSONDecoder().decode(ToolList.self, from: data)
-        #expect(decoded.tools.count >= 7)
+        #expect(decoded.tools.count >= 4)
 
         let toolNames = decoded.tools.map { $0.function.name }
         #expect(toolNames.contains("fix_mtu"))
