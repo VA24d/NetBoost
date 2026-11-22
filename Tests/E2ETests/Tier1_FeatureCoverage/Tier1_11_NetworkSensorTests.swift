@@ -93,7 +93,7 @@ struct Tier1_11_NetworkSensorTests {
         var receivedStates: [NetworkEnvironmentState] = []
 
         let task = Task {
-            for await state in mockEnv.environmentStream() {
+            for await state in mockEnv.makeStateStream() {
                 receivedStates.append(state)
                 if receivedStates.count >= 2 { break }
             }
