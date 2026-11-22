@@ -8,12 +8,12 @@ struct Tier1_15_PassepartoutControllerTests {
     struct PassepartoutController {
         static func parseScutilStatus(output: String) -> VPNStatus {
             let lower = output.lowercased()
-            if lower.contains("connected") && !lower.contains("disconnected") && !lower.contains("disconnecting") {
-                return .connected
+            if lower.contains("disconnecting") {
+                return .disconnecting
             } else if lower.contains("connecting") {
                 return .connecting
-            } else if lower.contains("disconnecting") {
-                return .disconnecting
+            } else if lower.contains("connected") && !lower.contains("disconnected") {
+                return .connected
             } else {
                 return .disconnected
             }

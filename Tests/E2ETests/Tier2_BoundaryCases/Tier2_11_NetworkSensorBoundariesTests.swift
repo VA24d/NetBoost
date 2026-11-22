@@ -40,20 +40,13 @@ struct Tier2_11_NetworkSensorBoundariesTests {
         let env = MockNetworkEnvironment(initialState: .disconnected)
         let stream = env.makeStateStream()
 
-        actor StateCollector {
-            private(set) var states: [NetworkEnvironmentState] = []
-            func add(_ state: NetworkEnvironmentState) {
-                states.append(state)
-            }
-            var count: Int { states.count }
-        }
-        let collector = StateCollector()
-
-        let collectorTask = Task {
+        let collectorTask = Task { () -> [NetworkEnvironmentState] in
+            var states: [NetworkEnvironmentState] = []
             for await state in stream {
-                await collector.add(state)
-                if await collector.count >= 4 { break }
+                states.append(state)
+                if states.count >= 4 { break }
             }
+            return states
         }
 
         await env.simulateFlapping(states: [
@@ -63,9 +56,8 @@ struct Tier2_11_NetworkSensorBoundariesTests {
             .defaultExternalWiFi
         ], interval: 0.01)
 
-        _ = await collectorTask.result
-        let totalCount = await collector.count
-        #expect(totalCount >= 4)
+        let receivedStates = await collectorTask.value
+        #expect(receivedStates.count >= 4)
     }
 
     @Test("T2-F11-03: All interfaces disconnected classifies as disconnected")
