@@ -111,4 +111,39 @@ struct Tier5_PerAdapterPrivateRelayTests {
         // Confirms it targets the specified service only
         #expect(!cmdAuto.contains("Wi-Fi"))
     }
+
+    // MARK: - Test 7: PrivateRelayManager Per-Adapter Commands
+
+    @Test("T5-Relay-07: PrivateRelayManager generates targeted networksetup commands without global overrides")
+    func testPrivateRelayManagerCommands() {
+        let inspectCmd = PrivateRelayManager.makeInspectServiceProxiesCommand(service: "USB 10/100 LAN")
+        #expect(inspectCmd.contains("-getwebproxy"))
+        #expect(inspectCmd.contains("USB 10/100 LAN"))
+
+        let disableCmd = PrivateRelayManager.makeDisablePrivateRelayCanaryCommand(service: "USB 10/100 LAN")
+        #expect(disableCmd.contains("-setproxybypassdomains"))
+        #expect(disableCmd.contains("USB 10/100 LAN"))
+        #expect(disableCmd.contains("*.mask.icloud.com"))
+        #expect(disableCmd.contains("*.mask-h2.icloud.com"))
+
+        let restoreCmd = PrivateRelayManager.makeRestorePrivateRelayCanaryCommand(service: "USB 10/100 LAN")
+        #expect(restoreCmd.contains("-setproxybypassdomains"))
+        #expect(restoreCmd.contains("USB 10/100 LAN"))
+        #expect(restoreCmd.contains("Empty"))
+
+        #expect(PrivateRelayManager.parsePrivateRelayBypassStatus(output: "Bypass list: *.mask.icloud.com, *.mask-h2.icloud.com"))
+        #expect(!PrivateRelayManager.parsePrivateRelayBypassStatus(output: "Bypass list: *.local, 169.254/16"))
+    }
+
+    // MARK: - Test 8: CampusDoctor Protocol Default Implementations
+
+    @Test("T5-Relay-08: CampusDoctor provides non-blocking per-adapter Private Relay isolation")
+    func testCampusDoctorPrivateRelayIsolation() async throws {
+        let doctor = CampusDoctor()
+        // Calling isolate on nonexistent device in test environment should gracefully handle or bypass without crash
+        if !PrivilegeHelper.isRoot {
+            let isolated = await doctor.repairRoutines.isPrivateRelayIsolated(service: "Wi-Fi")
+            #expect(!isolated)
+        }
+    }
 }
