@@ -117,8 +117,39 @@ case "$ACTION" in
         networksetup -ordernetworkservices "$@"
         ;;
 
+    isolate-relay)
+        SERVICE="${1:-}"
+        if [ -z "$SERVICE" ]; then
+            echo "Error: Service name required" >&2
+            exit 2
+        fi
+        echo "Isolating Private Relay on service: $SERVICE..."
+        networksetup -setproxybypassdomains "$SERVICE" "*.mask.icloud.com" "*.mask-h2.icloud.com"
+        ;;
+
+    restore-relay)
+        SERVICE="${1:-}"
+        if [ -z "$SERVICE" ]; then
+            echo "Error: Service name required" >&2
+            exit 2
+        fi
+        echo "Restoring Private Relay on service: $SERVICE..."
+        networksetup -setproxybypassdomains "$SERVICE" "Empty"
+        ;;
+
+    batch-autofix)
+        SERVICE="${1:-Wi-Fi}"
+        MTU="${2:-1280}"
+        echo "Executing batch Auto-Fix (MTU $MTU, DNS, ARP) on $SERVICE..."
+        networksetup -setMTU "$SERVICE" "$MTU"
+        dscacheutil -flushcache
+        killall -HUP mDNSResponder 2>/dev/null || true
+        arp -d -a 2>/dev/null || true
+        echo "Batch Auto-Fix complete."
+        ;;
+
     *)
-        echo "Usage: $0 {status|set-ip-forwarding [0|1]|pf-enable|pf-disable|pf-load-anchor <anchor> <file>|pf-flush-anchor <anchor>|set-mtu <device> <mtu>|flush-dns|flush-arp|disable-ipv6 <service>|reset-dns <service>|clean-proxies <service>|order-services <service1> <service2>...}" >&2
+        echo "Usage: $0 {status|set-ip-forwarding [0|1]|pf-enable|pf-disable|pf-load-anchor <anchor> <file>|pf-flush-anchor <anchor>|set-mtu <device> <mtu>|flush-dns|flush-arp|disable-ipv6 <service>|reset-dns <service>|clean-proxies <service>|order-services <service1> <service2>...|isolate-relay <service>|restore-relay <service>|batch-autofix <service> <mtu>}" >&2
         exit 1
         ;;
 esac

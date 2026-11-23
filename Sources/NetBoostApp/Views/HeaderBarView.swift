@@ -46,6 +46,38 @@ public struct HeaderBarView: View {
 
             Spacer()
 
+            // Privilege Authorization Status / Upfront Authorization Trigger
+            if !appState.isAuthorized {
+                Button {
+                    Task {
+                        await appState.requestUpfrontAuthorization()
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "lock.shield")
+                            .font(.system(size: 11))
+                        Text("Authorize")
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    }
+                }
+                .buttonStyle(GlowingButtonStyle(accentColor: GlassTheme.cyanSapphire, isProminent: false))
+                .help("Grant upfront administrator privileges for instant one-click optimizations")
+            } else {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.shield.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(GlassTheme.emeraldGreen)
+                    Text("Authorized")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(GlassTheme.emeraldGreen)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(GlassTheme.emeraldGreen.opacity(0.12))
+                .clipShape(Capsule())
+                .help("NetBoost privileged helper session is active")
+            }
+
             // Active Environment Status Pill
             StatusPill(
                 text: appState.activeStatePill,

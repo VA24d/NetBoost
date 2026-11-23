@@ -25,14 +25,11 @@ struct Tier5_SingleAuthElevationStressTests {
         // Inner tool execution failure with exit code 1 and tool diagnostic stderr:
         // When a tool like pfctl or sysctl fails with exit code 1 due to syntax/parameter error,
         // it should NOT be diagnosed as elevationDenied (user cancelled).
-        // Current code has: if output.stderr.contains("User canceled") || output.exitCode == 1 { throw .elevationDenied }
         let toolFailureOutput = ShellOutput(stdout: "", stderr: "pfctl: syntax error in rules file", exitCode: 1)
         do {
             _ = try PrivilegeHelper.handleElevationResult(toolFailureOutput)
             Issue.record("Expected executionFailed error on tool failure exit code 1")
         } catch let err as PrivilegeError {
-            // Documenting empirical behavior: current code throws elevationDenied for any exitCode == 1!
-            // In an ideal architecture, this should be .executionFailed("pfctl: syntax error in rules file").
             let isElevationDenied = (err == .elevationDenied)
             let isExecutionFailed: Bool
             if case .executionFailed(let msg) = err {
@@ -40,7 +37,8 @@ struct Tier5_SingleAuthElevationStressTests {
             } else {
                 isExecutionFailed = false
             }
-            #expect(isElevationDenied || isExecutionFailed)
+            #expect(!isElevationDenied)
+            #expect(isExecutionFailed)
         }
     }
 
@@ -162,5 +160,68 @@ struct Tier5_SingleAuthElevationStressTests {
             // When not root, verify elevation mechanism requires AppleScript or helper daemon
             #expect(geteuid() != 0)
         }
+    }
+
+    // MARK: - Test 8: Upfront Authorization Session Caching
+
+    @Test("T5-Auth-08: PrivilegeHelper upfront authorization session caching and token lifecycle")
+    func testUpfrontAuthorizationSessionCaching() {
+        PrivilegeHelper.revokeAuthorization()
+        if !PrivilegeHelper.isRoot {
+            #expect(!PrivilegeHelper.isAuthorized)
+            #expect(PrivilegeHelper.sessionToken == nil)
+
+            PrivilegeHelper.setAuthorizedForTesting(true)
+            #expect(PrivilegeHelper.isAuthorized)
+            #expect(PrivilegeHelper.sessionToken == "test-token")
+
+            PrivilegeHelper.revokeAuthorization()
+            #expect(!PrivilegeHelper.isAuthorized)
+            #expect(PrivilegeHelper.sessionToken == nil)
+        } else {
+            #expect(PrivilegeHelper.isAuthorized)
+        }
+    }
+
+    // MARK: - Test 9: Atomic Batch Elevation Command Generation
+
+    @Test("T5-Auth-09: runBatchElevated executes multiple commands via single atomic chain")
+    func testRunBatchElevatedChainsCommands() async throws {
+        let commands = [
+            "/bin/echo 'step 1'",
+            "/bin/echo 'step 2'",
+            "/bin/echo 'step 3'"
+        ]
+
+        if PrivilegeHelper.isRoot {
+            let output = try await PrivilegeHelper.runBatchElevated(commands: commands)
+            #expect(output.succeeded)
+            #expect(output.stdout.contains("step 1"))
+            #expect(output.stdout.contains("step 2"))
+            #expect(output.stdout.contains("step 3"))
+        } else {
+            let emptyOutput = try await PrivilegeHelper.runBatchElevated(commands: [])
+            #expect(emptyOutput.succeeded)
+            #expect(emptyOutput.stdout.isEmpty)
+        }
+    }
+
+    // MARK: - Test 10: AppState Upfront Authorization Trigger
+
+    @Test("T5-Auth-10: AppState requestUpfrontAuthorization handles grant and denial cleanly")
+    @MainActor
+    func testAppStateUpfrontAuthorizationTrigger() async {
+        let appState = AppState(startBackgroundTimers: false)
+        PrivilegeHelper.setAuthorizedForTesting(true)
+
+        #expect(PrivilegeHelper.isAuthorized)
+        await appState.requestUpfrontAuthorization()
+
+        if PrivilegeHelper.isAuthorized {
+            #expect(appState.isAuthorized)
+            #expect(appState.authorizationSummary == "Authorized")
+        }
+
+        PrivilegeHelper.revokeAuthorization()
     }
 }

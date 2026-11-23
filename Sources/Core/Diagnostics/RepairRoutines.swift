@@ -73,6 +73,8 @@ public final class RepairRoutines: @unchecked Sendable {
         } else {
             do {
                 _ = try await PrivilegeHelper.runElevated(script: cmd[0], arguments: Array(cmd.dropFirst()))
+            } catch PrivilegeError.elevationDenied {
+                throw PrivilegeError.elevationDenied
             } catch {
                 _ = try? await PrivilegeHelper.runHelper(action: "flush-arp")
             }
@@ -89,6 +91,8 @@ public final class RepairRoutines: @unchecked Sendable {
         } else {
             do {
                 _ = try await PrivilegeHelper.runElevated(script: cmd[0], arguments: Array(cmd.dropFirst()))
+            } catch PrivilegeError.elevationDenied {
+                throw PrivilegeError.elevationDenied
             } catch {
                 _ = try? await PrivilegeHelper.runHelper(action: "reset-dns", arguments: [service])
             }
@@ -115,6 +119,8 @@ public final class RepairRoutines: @unchecked Sendable {
         } else {
             do {
                 _ = try await PrivilegeHelper.runElevated(script: cmd[0], arguments: Array(cmd.dropFirst()))
+            } catch PrivilegeError.elevationDenied {
+                throw PrivilegeError.elevationDenied
             } catch {
                 _ = try? await PrivilegeHelper.runHelper(action: "disable-ipv6", arguments: [service])
             }
@@ -147,11 +153,56 @@ public final class RepairRoutines: @unchecked Sendable {
             let combined = "\(cmd1.joined(separator: " ")) && \(cmd2.joined(separator: " ")) && \(cmd3.joined(separator: " "))"
             do {
                 _ = try await PrivilegeHelper.runElevated(script: combined)
+            } catch PrivilegeError.elevationDenied {
+                throw PrivilegeError.elevationDenied
             } catch {
                 _ = try? await PrivilegeHelper.runHelper(action: "clean-proxies", arguments: [service])
             }
         }
         recordEvent("Cleaned auto-proxy PAC and web proxy settings on '\(service)'")
+    }
+
+    // MARK: - Per-Adapter Private Relay Management
+
+    /// Checks if Private Relay is specifically isolated (bypassed/disabled) on the given service.
+    public func isPrivateRelayIsolated(service: String) async -> Bool {
+        let cmd = PrivateRelayManager.makeInspectServiceProxiesCommand(service: service)
+        let output = (try? await ShellCommand.run(cmd[0], arguments: Array(cmd.dropFirst())))?.stdout ?? ""
+        return PrivateRelayManager.parsePrivateRelayBypassStatus(output: output)
+    }
+
+    /// Disables Private Relay on the target campus service (e.g. en10) while preserving it on other adapters.
+    public func isolatePrivateRelay(for service: String) async throws {
+        let cmd = PrivateRelayManager.makeDisablePrivateRelayCanaryCommand(service: service)
+        if PrivilegeHelper.isRoot {
+            _ = try await ShellCommand.run(cmd[0], arguments: Array(cmd.dropFirst()))
+        } else {
+            do {
+                _ = try await PrivilegeHelper.runElevated(script: cmd[0], arguments: Array(cmd.dropFirst()))
+            } catch PrivilegeError.elevationDenied {
+                throw PrivilegeError.elevationDenied
+            } catch {
+                _ = try? await PrivilegeHelper.runHelper(action: "isolate-relay", arguments: [service])
+            }
+        }
+        recordEvent("iCloud Private Relay isolated on '\(service)' to avoid campus portal/MTU interference")
+    }
+
+    /// Restores Private Relay configuration on the target service.
+    public func restorePrivateRelay(for service: String) async throws {
+        let cmd = PrivateRelayManager.makeRestorePrivateRelayCanaryCommand(service: service)
+        if PrivilegeHelper.isRoot {
+            _ = try await ShellCommand.run(cmd[0], arguments: Array(cmd.dropFirst()))
+        } else {
+            do {
+                _ = try await PrivilegeHelper.runElevated(script: cmd[0], arguments: Array(cmd.dropFirst()))
+            } catch PrivilegeError.elevationDenied {
+                throw PrivilegeError.elevationDenied
+            } catch {
+                _ = try? await PrivilegeHelper.runHelper(action: "restore-relay", arguments: [service])
+            }
+        }
+        recordEvent("iCloud Private Relay restored on '\(service)'")
     }
 }
 
@@ -253,5 +304,29 @@ public struct ProxySettingsManager: Sendable {
 
     public static func parseProxyState(output: String) -> Bool {
         output.lowercased().contains("enabled: yes")
+    }
+}
+
+// MARK: - iCloud Private Relay Per-Adapter Isolation
+
+public struct PrivateRelayManager: Sendable {
+    /// Generates shell command to inspect whether a network service has custom proxy or resolver configurations.
+    public static func makeInspectServiceProxiesCommand(service: String) -> [String] {
+        ["/usr/sbin/networksetup", "-getwebproxy", service]
+    }
+
+    /// Generates shell command to disable Apple Private Relay on a specific service by configuring localized DNS canary block.
+    public static func makeDisablePrivateRelayCanaryCommand(service: String) -> [String] {
+        ["/usr/sbin/networksetup", "-setproxybypassdomains", service, "*.mask.icloud.com", "*.mask-h2.icloud.com"]
+    }
+
+    /// Generates shell command to clear Private Relay canary bypass domains.
+    public static func makeRestorePrivateRelayCanaryCommand(service: String) -> [String] {
+        ["/usr/sbin/networksetup", "-setproxybypassdomains", service, "Empty"]
+    }
+
+    /// Evaluates whether Private Relay canary bypass domains are present in networksetup output.
+    public static func parsePrivateRelayBypassStatus(output: String) -> Bool {
+        output.contains("mask.icloud.com")
     }
 }

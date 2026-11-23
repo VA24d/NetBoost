@@ -35,9 +35,20 @@ public struct NetBoostApp: App {
                 .environmentObject(appState)
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: appState.appLogoStyle.iconName)
-                if !appState.menuBarThroughputText.isEmpty {
-                    Text(appState.menuBarThroughputText)
+                switch appState.menuBarIconStyle {
+                case .iconAndSpeed:
+                    Image(systemName: appState.appLogoStyle.iconName)
+                    if !appState.menuBarThroughputText.isEmpty {
+                        Text(appState.menuBarThroughputText)
+                    }
+                case .compactSpeed:
+                    if !appState.menuBarThroughputText.isEmpty {
+                        Text(appState.menuBarThroughputText)
+                    } else {
+                        Image(systemName: appState.appLogoStyle.iconName)
+                    }
+                case .minimalBadge:
+                    Image(systemName: appState.appLogoStyle.iconName)
                 }
             }
         }

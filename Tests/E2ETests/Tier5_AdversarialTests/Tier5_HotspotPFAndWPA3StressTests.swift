@@ -247,4 +247,47 @@ struct Tier5_HotspotPFAndWPA3StressTests {
             #expect(finished == taskCount)
         }
     }
+
+    // MARK: - Test 11: DHCP Concurrent Discover Reservation Isolation
+
+    @Test("T5-Hotspot-11: Concurrent DHCP discover requests receive distinct reserved IPs preventing duplicate offers")
+    func testDHCPConcurrentDiscoverReservationIsolation() {
+        let dhcp = DHCPServer()
+        dhcp.start()
+
+        let macA = "02:11:22:33:44:01"
+        let macB = "02:11:22:33:44:02"
+
+        let offerA = dhcp.handleDiscover(mac: macA)
+        let offerB = dhcp.handleDiscover(mac: macB)
+
+        #expect(offerA != nil)
+        #expect(offerB != nil)
+        #expect(offerA != offerB, "Concurrent discover callers must receive distinct reserved IP addresses")
+        #expect(offerA == "192.168.2.10")
+        #expect(offerB == "192.168.2.11")
+
+        // Re-discover by macA returns the same reserved IP
+        let rediscoveryA = dhcp.handleDiscover(mac: macA)
+        #expect(rediscoveryA == offerA)
+    }
+
+    // MARK: - Test 12: DHCP Request Collision Rejection
+
+    @Test("T5-Hotspot-12: DHCP request for IP already leased or reserved to another MAC is rejected")
+    func testDHCPRequestCollisionRejection() {
+        let dhcp = DHCPServer()
+        dhcp.start()
+
+        let macA = "02:AA:BB:CC:DD:01"
+        let macB = "02:AA:BB:CC:DD:02"
+
+        // macA obtains lease on 192.168.2.10
+        let leaseA = dhcp.handleRequest(mac: macA, requestedIP: "192.168.2.10", hostname: "ClientA")
+        #expect(leaseA != nil)
+
+        // macB attempts to request macA's active leased IP
+        let collisionAttempt = dhcp.handleRequest(mac: macB, requestedIP: "192.168.2.10", hostname: "RogueClient")
+        #expect(collisionAttempt == nil, "DHCP server must reject requests that collide with an active client lease")
+    }
 }

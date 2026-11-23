@@ -132,10 +132,34 @@ public final class AppState: ObservableObject {
     @Published public var menuBarIconStyle: MenuBarIconStyle = .iconAndSpeed
     @Published public var appLogoStyle: AppLogoStyle = .sapphireLightning
 
+    // MARK: - Upfront Privilege Authorization
+    @Published public var isAuthorized: Bool = PrivilegeHelper.isAuthorized
+    @Published public var authorizationSummary: String? = nil
+
     // Private tracking for hardware interface throughput
     private var lastInterfaceIn: UInt64 = 0
     private var lastInterfaceOut: UInt64 = 0
     private var lastInterfaceSampleTime: Date = Date()
+    private var lastTrackedInterface: String? = nil
+
+    public func requestUpfrontAuthorization() async {
+        do {
+            let granted = try await PrivilegeHelper.requestAuthorization()
+            self.isAuthorized = granted
+            if granted {
+                self.authorizationSummary = "Authorized"
+                appendRepairLog("🔐 Administrator privileges successfully authorized for NetBoost session")
+            }
+        } catch PrivilegeError.elevationDenied {
+            self.isAuthorized = false
+            self.authorizationSummary = "Authorization Cancelled"
+            appendRepairLog("⚠️ Administrator authorization cancelled by user")
+        } catch {
+            self.isAuthorized = false
+            self.authorizationSummary = "Authorization Failed"
+            appendRepairLog("❌ Authorization error: \(error.localizedDescription)")
+        }
+    }
 
     public var canEnableHotspot: Bool {
         upstreamInterface == "en10" || activeEnvironment.isCampusLAN || (activeEnvironment.primaryInterface == "en10")
@@ -292,26 +316,16 @@ public final class AppState: ObservableObject {
         guard !isAutoFixRunning else { return }
         isAutoFixRunning = true
         autoFixSummary = nil
-        appendRepairLog("⚡ Auto-Fix initiated: priority sequence MTU (1280) -> DNS -> ARP")
+        appendRepairLog("⚡ Auto-Fix initiated: atomic batch MTU (1280) -> DNS -> ARP")
 
         do {
-            // 1. Fix MTU to 1280 (eliminates bad record mac / TLS packet drops)
-            appendRepairLog("Setting MTU to 1280 on Wi-Fi...")
-            try await campusDoctor.fixMTU(service: "Wi-Fi", mtu: 1280)
-            appendRepairLog("✓ MTU 1280 configured")
-
-            // 2. Flush DNS cache
-            appendRepairLog("Flushing mDNSResponder & dscacheutil...")
-            try await campusDoctor.flushDNS()
-            appendRepairLog("✓ DNS cache flushed")
-
-            // 3. Flush ARP table
-            appendRepairLog("Flushing kernel ARP cache...")
-            try await campusDoctor.flushARP()
-            appendRepairLog("✓ ARP cache cleared")
-
+            try await campusDoctor.executeBatchAutoFix(service: "Wi-Fi", mtu: 1280)
             autoFixSummary = "Auto-Fix Complete: MTU, DNS & ARP Restored"
             appendRepairLog("🎉 \(autoFixSummary!)")
+        } catch PrivilegeError.elevationDenied {
+            let errString = "Auto-Fix cancelled: Administrator elevation was denied"
+            autoFixSummary = "Auto-Fix error: \(errString)"
+            appendRepairLog("❌ \(autoFixSummary!)")
         } catch {
             let errString = "Auto-Fix error: \(error.localizedDescription)"
             autoFixSummary = errString
@@ -642,29 +656,41 @@ public final class AppState: ObservableObject {
                     let dt = max(0.2, now.timeIntervalSince(self.lastInterfaceSampleTime))
                     self.lastInterfaceSampleTime = now
 
-                    let counters = DarwinSocketHelper.getInterfaceBytes(for: self.primaryInterface.isEmpty ? nil : self.primaryInterface)
+                    let currentIface = self.primaryInterface.isEmpty ? nil : self.primaryInterface
+                    let counters = DarwinSocketHelper.getInterfaceBytes(for: currentIface)
 
                     var instDown: Double = 0
                     var instUp: Double = 0
 
-                    if self.isProxyActive {
-                        let connections = self.proxyDispatcher.activeConnections
-                        var bytesUp: Double = 0
-                        var bytesDown: Double = 0
-                        for conn in connections {
-                            bytesUp += Double(conn.bytesWritten)
-                            bytesDown += Double(conn.bytesRead)
+                    if self.lastTrackedInterface != currentIface {
+                        // Interface switched or reconnected; re-establish baseline
+                        self.lastTrackedInterface = currentIface
+                        self.lastInterfaceIn = counters.inputBytes
+                        self.lastInterfaceOut = counters.outputBytes
+                    } else if self.lastInterfaceIn > 0 {
+                        // Inbound 32-bit Darwin counter rollover math
+                        let deltaIn: UInt64
+                        if counters.inputBytes >= self.lastInterfaceIn {
+                            deltaIn = counters.inputBytes - self.lastInterfaceIn
+                        } else if self.lastInterfaceIn <= UInt64(UInt32.max) {
+                            deltaIn = (UInt64(UInt32.max) - self.lastInterfaceIn + 1) + counters.inputBytes
+                        } else {
+                            deltaIn = 0
                         }
-                        instDown = bytesDown
-                        instUp = bytesUp
-                    } else if let task = self.activeDownloadTask {
-                        instDown = task.speedBytesPerSec
-                        instUp = 0
-                    } else if self.lastInterfaceIn > 0 && counters.inputBytes >= self.lastInterfaceIn {
-                        let deltaIn = counters.inputBytes - self.lastInterfaceIn
-                        let deltaOut = counters.outputBytes >= self.lastInterfaceOut ? (counters.outputBytes - self.lastInterfaceOut) : 0
-                        instDown = Double(deltaIn) / dt
-                        instUp = Double(deltaOut) / dt
+
+                        // Outbound 32-bit Darwin counter rollover math
+                        let deltaOut: UInt64
+                        if counters.outputBytes >= self.lastInterfaceOut {
+                            deltaOut = counters.outputBytes - self.lastInterfaceOut
+                        } else if self.lastInterfaceOut <= UInt64(UInt32.max) {
+                            deltaOut = (UInt64(UInt32.max) - self.lastInterfaceOut + 1) + counters.outputBytes
+                        } else {
+                            deltaOut = 0
+                        }
+
+                        // Protect against unreasonable spikes (> 10 GB/s on interface flap)
+                        instDown = (deltaIn < 10_000_000_000) ? (Double(deltaIn) / dt) : 0
+                        instUp = (deltaOut < 10_000_000_000) ? (Double(deltaOut) / dt) : 0
                     }
 
                     self.lastInterfaceIn = counters.inputBytes

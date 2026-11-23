@@ -11,6 +11,8 @@ public protocol CampusDoctorProtocol: Sendable {
     func disableIPv6(service: String) async throws
     func reorderServices(ordered: [String]) async throws
     func executeBatchAutoFix(service: String, mtu: Int) async throws
+    func isolatePrivateRelay(service: String) async throws
+    func restorePrivateRelay(service: String) async throws
 }
 
 extension CampusDoctorProtocol {
@@ -19,6 +21,9 @@ extension CampusDoctorProtocol {
         try await flushDNS()
         try await flushARP()
     }
+
+    public func isolatePrivateRelay(service: String = "USB 10/100 LAN") async throws {}
+    public func restorePrivateRelay(service: String = "USB 10/100 LAN") async throws {}
 }
 
 /// Master network doctor coordinating latency probes, captive detection, MTU checks, and automated repairs.
@@ -162,5 +167,13 @@ public final class CampusDoctor: CampusDoctorProtocol, Sendable {
 
     public func executeBatchAutoFix(service: String = "Wi-Fi", mtu: Int = 1280) async throws {
         try await repairRoutines.executeBatchAutoFix(service: service, mtu: mtu)
+    }
+
+    public func isolatePrivateRelay(service: String = "USB 10/100 LAN") async throws {
+        try await repairRoutines.isolatePrivateRelay(for: service)
+    }
+
+    public func restorePrivateRelay(service: String = "USB 10/100 LAN") async throws {
+        try await repairRoutines.restorePrivateRelay(for: service)
     }
 }

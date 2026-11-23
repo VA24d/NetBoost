@@ -34,7 +34,7 @@ public enum GlassTheme {
     public static let textTertiary = Color.white.opacity(0.45)
 
     // Window Metrics
-    public static let minWindowWidth: CGFloat = 850
+    public static let minWindowWidth: CGFloat = 920
     public static let minWindowHeight: CGFloat = 600
     public static let recommendedMinWidth: CGFloat = 960
     public static let defaultWindowWidth: CGFloat = 1040

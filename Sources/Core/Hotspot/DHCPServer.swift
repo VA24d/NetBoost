@@ -3,9 +3,15 @@ import Foundation
 /// Lightweight DHCP lease management service and IP allocator for the hotspot subnet (192.168.2.0/24).
 public final class DHCPServer: @unchecked Sendable {
 
+    private struct Reservation {
+        let ipAddress: String
+        let expiresAt: Date
+    }
+
     private let config: HotspotConfiguration
     private var leases: [String: DHCPLease] = [:] // MAC -> Lease
     private var allocatedIPs: Set<String> = []
+    private var reservations: [String: Reservation] = [:] // MAC -> Reservation
     private let lock = NSLock()
     private var isRunning: Bool = false
 
@@ -13,7 +19,7 @@ public final class DHCPServer: @unchecked Sendable {
         self.config = config
     }
 
-    /// Handles DHCP DISCOVER: checks for active lease renewal or allocates next available candidate IP.
+    /// Handles DHCP DISCOVER: checks for active lease renewal or allocates next available candidate IP with a 60-second reservation.
     public func handleDiscover(mac: String) -> String? {
         lock.lock()
         defer { lock.unlock() }
@@ -24,17 +30,25 @@ public final class DHCPServer: @unchecked Sendable {
             return existing.ipAddress
         }
 
+        if let existingReservation = reservations[mac], existingReservation.expiresAt > Date() {
+            return existingReservation.ipAddress
+        }
+
+        let reservedIPs = Set(reservations.values.map { $0.ipAddress })
+
         // Allocate from range 10...100
         for i in 10...100 {
             let candidate = "192.168.2.\(i)"
-            if !allocatedIPs.contains(candidate) {
+            if !allocatedIPs.contains(candidate) && !reservedIPs.contains(candidate) {
+                // Hold reservation for 60 seconds to prevent concurrent DISCOVER duplicate offers
+                reservations[mac] = Reservation(ipAddress: candidate, expiresAt: Date().addingTimeInterval(60))
                 return candidate
             }
         }
         return nil // Pool exhausted
     }
 
-    /// Handles DHCP REQUEST: binds IP address to client MAC with a lease record.
+    /// Handles DHCP REQUEST: binds IP address to client MAC with a lease record, rejecting collisions with active leases or other reservations.
     public func handleRequest(
         mac: String,
         requestedIP: String,
@@ -43,6 +57,20 @@ public final class DHCPServer: @unchecked Sendable {
     ) -> DHCPLease? {
         lock.lock()
         defer { lock.unlock() }
+
+        cleanExpiredLeasesUnderLock()
+
+        // Verify that requestedIP is not already leased to a different active client MAC
+        if leases.contains(where: { $0.value.ipAddress == requestedIP && $0.key != mac && !$0.value.isExpired }) {
+            return nil // IP collision detected
+        }
+
+        // Verify that requestedIP is not reserved by a different client MAC
+        if reservations.contains(where: { $0.value.ipAddress == requestedIP && $0.key != mac && $0.value.expiresAt > Date() }) {
+            return nil // IP reserved by another client
+        }
+
+        reservations.removeValue(forKey: mac)
 
         if let existing = leases[mac], existing.ipAddress != requestedIP {
             allocatedIPs.remove(existing.ipAddress)
@@ -58,6 +86,7 @@ public final class DHCPServer: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
+        reservations.removeValue(forKey: mac)
         guard let lease = leases.removeValue(forKey: mac) else { return false }
         allocatedIPs.remove(lease.ipAddress)
         return true
@@ -74,9 +103,12 @@ public final class DHCPServer: @unchecked Sendable {
             return existing
         }
 
+        reservations.removeValue(forKey: mac)
+        let reservedIPs = Set(reservations.values.map { $0.ipAddress })
+
         for i in 10...100 {
             let candidate = "192.168.2.\(i)"
-            if !allocatedIPs.contains(candidate) {
+            if !allocatedIPs.contains(candidate) && !reservedIPs.contains(candidate) {
                 allocatedIPs.insert(candidate)
                 let lease = DHCPLease(ipAddress: candidate, macAddress: mac, hostname: hostname, leaseStart: Date(), leaseDuration: duration)
                 leases[mac] = lease
@@ -112,6 +144,7 @@ public final class DHCPServer: @unchecked Sendable {
             leases.removeValue(forKey: mac)
             allocatedIPs.remove(lease.ipAddress)
         }
+        reservations = reservations.filter { $0.value.expiresAt > now }
     }
 
     public func start() {
@@ -126,6 +159,7 @@ public final class DHCPServer: @unchecked Sendable {
         isRunning = false
         leases.removeAll()
         allocatedIPs.removeAll()
+        reservations.removeAll()
     }
 }
 

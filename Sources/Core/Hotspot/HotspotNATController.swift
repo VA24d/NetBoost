@@ -52,6 +52,12 @@ public final class HotspotNATController: HotspotControllerProtocol, @unchecked S
     ) async throws {
         updateConfig(upstream: upstreamInterface, downstream: downstreamInterface)
 
+        // Clean up any previously orphaned rule file
+        if let existingPath = self.ruleFilePath {
+            try? FileManager.default.removeItem(atPath: existingPath)
+            self.ruleFilePath = nil
+        }
+
         // Generate and write isolated PF NAT anchor rules
         let tempRuleFile = NSTemporaryDirectory() + "netboost_hotspot_\(UUID().uuidString).pf"
         let rules = pfManager.generateNATRule()
@@ -61,6 +67,8 @@ public final class HotspotNATController: HotspotControllerProtocol, @unchecked S
         // Dry-run validate PF rules
         let dryRunOutput = try await ShellCommand.run("/sbin/pfctl", arguments: ["-nf", tempRuleFile])
         guard dryRunOutput.succeeded else {
+            try? FileManager.default.removeItem(atPath: tempRuleFile)
+            self.ruleFilePath = nil
             throw PrivilegeError.executionFailed("PF NAT rule validation failed: \(dryRunOutput.stderr)")
         }
 
@@ -80,6 +88,8 @@ public final class HotspotNATController: HotspotControllerProtocol, @unchecked S
             do {
                 _ = try await PrivilegeHelper.runElevated(script: combinedStart)
             } catch PrivilegeError.elevationDenied {
+                try? FileManager.default.removeItem(atPath: tempRuleFile)
+                self.ruleFilePath = nil
                 throw PrivilegeError.elevationDenied
             } catch {
                 _ = try? await PrivilegeHelper.runHelper(action: "pf-load-anchor", arguments: [pfManager.anchorName, tempRuleFile])
@@ -135,6 +145,8 @@ public final class HotspotNATController: HotspotControllerProtocol, @unchecked S
         } else {
             do {
                 _ = try await PrivilegeHelper.runElevated(script: cmd[0], arguments: Array(cmd.dropFirst()))
+            } catch PrivilegeError.elevationDenied {
+                throw PrivilegeError.elevationDenied
             } catch {
                 _ = try? await PrivilegeHelper.runHelper(action: "set-ip-forwarding", arguments: [enable ? "1" : "0"])
             }
