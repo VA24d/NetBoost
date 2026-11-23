@@ -18,9 +18,15 @@ public struct MainWindowView: View {
                     .ignoresSafeArea()
             } else {
                 ZStack {
-                    GlassTheme.backgroundDark.opacity(0.85)
-                    Rectangle()
-                        .fill(.ultraThinMaterial)
+                    VisualEffectBackground(material: .underWindowBackground, blendingMode: .behindWindow)
+                    LinearGradient(
+                        colors: [
+                            GlassTheme.backgroundDark.opacity(0.35),
+                            GlassTheme.backgroundDark.opacity(0.20)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
                 }
                 .ignoresSafeArea()
             }
@@ -36,7 +42,7 @@ public struct MainWindowView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         // App Brand Title
                         HStack(spacing: 8) {
-                            Image(systemName: "bolt.horizontal.circle.fill")
+                            Image(systemName: appState.appLogoStyle.iconName)
                                 .font(.system(size: 20))
                                 .foregroundColor(GlassTheme.cyanNeon)
                             Text("NetBoost")

@@ -10,6 +10,15 @@ public protocol CampusDoctorProtocol: Sendable {
     func flushARP() async throws
     func disableIPv6(service: String) async throws
     func reorderServices(ordered: [String]) async throws
+    func executeBatchAutoFix(service: String, mtu: Int) async throws
+}
+
+extension CampusDoctorProtocol {
+    public func executeBatchAutoFix(service: String = "Wi-Fi", mtu: Int = 1280) async throws {
+        try await fixMTU(service: service, mtu: mtu)
+        try await flushDNS()
+        try await flushARP()
+    }
 }
 
 /// Master network doctor coordinating latency probes, captive detection, MTU checks, and automated repairs.
@@ -149,5 +158,9 @@ public final class CampusDoctor: CampusDoctorProtocol, Sendable {
 
     public func reorderServices(ordered: [String]) async throws {
         try await serviceOrderManager.reorderServices(orderedServices: ordered)
+    }
+
+    public func executeBatchAutoFix(service: String = "Wi-Fi", mtu: Int = 1280) async throws {
+        try await repairRoutines.executeBatchAutoFix(service: service, mtu: mtu)
     }
 }

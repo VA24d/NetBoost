@@ -3,6 +3,8 @@ import NetBoostCore
 
 public struct HotspotView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var showPassword: Bool = false
+    @State private var copiedConfirmation: Bool = false
 
     public init() {}
 
@@ -70,6 +72,22 @@ public struct HotspotView: View {
                         .help(appState.canEnableHotspot ? "Toggle Hotspot NAT" : "Requires active Ethernet (en10) to enable sharing")
                     }
 
+                    HStack {
+                        Button {
+                            appState.openSystemSharingSettings()
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "gearshape")
+                                Text("Open macOS Internet Sharing Settings")
+                            }
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(GlassTheme.cyanNeon)
+                        }
+                        .buttonStyle(.plain)
+
+                        Spacer()
+                    }
+
                     if !appState.canEnableHotspot {
                         HStack(spacing: 6) {
                             Image(systemName: "info.circle")
@@ -85,7 +103,7 @@ public struct HotspotView: View {
 
                 // Hotspot Configuration Card
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("Access Point & DHCP Configuration")
+                    Text("Access Point & Security Configuration")
                         .font(.system(size: 15, weight: .bold))
                         .foregroundColor(.white)
 
@@ -103,16 +121,86 @@ public struct HotspotView: View {
                         }
 
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("WPA2 PASSWORD")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(GlassTheme.textTertiary)
-                            SecureField("Password", text: $appState.hotspotPassword)
-                                .textFieldStyle(.plain)
-                                .font(.system(size: 13, design: .monospaced))
-                                .padding(8)
-                                .background(Color.black.opacity(0.3))
-                                .cornerRadius(8)
+                            HStack {
+                                Text("HOTSPOT PASSWORD")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(GlassTheme.textTertiary)
+                                Spacer()
+                                if copiedConfirmation {
+                                    Text("Copied!")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .foregroundColor(GlassTheme.emeraldGreen)
+                                }
+                            }
+
+                            HStack(spacing: 6) {
+                                if showPassword {
+                                    TextField("Password", text: $appState.hotspotPassword)
+                                        .textFieldStyle(.plain)
+                                        .font(.system(size: 13, design: .monospaced))
+                                } else {
+                                    SecureField("Password", text: $appState.hotspotPassword)
+                                        .textFieldStyle(.plain)
+                                        .font(.system(size: 13, design: .monospaced))
+                                }
+
+                                // View/Hide Password Button
+                                Button {
+                                    showPassword.toggle()
+                                } label: {
+                                    Image(systemName: showPassword ? "eye.slash.fill" : "eye.fill")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(showPassword ? GlassTheme.cyanNeon : GlassTheme.textTertiary)
+                                }
+                                .buttonStyle(.plain)
+                                .help(showPassword ? "Hide password" : "View password")
+
+                                // Copy Password Button
+                                Button {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(appState.hotspotPassword, forType: .string)
+                                    copiedConfirmation = true
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                        copiedConfirmation = false
+                                    }
+                                } label: {
+                                    Image(systemName: "doc.on.doc.fill")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(GlassTheme.cyanSapphire)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Copy password to clipboard")
+
+                                // Generate Random Secure Password Button
+                                Button {
+                                    let chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%"
+                                    appState.hotspotPassword = String((0..<12).compactMap { _ in chars.randomElement() })
+                                } label: {
+                                    Image(systemName: "arrow.triangle.2.circlepath")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(GlassTheme.emeraldGreen)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Generate random secure password")
+                            }
+                            .padding(8)
+                            .background(Color.black.opacity(0.3))
+                            .cornerRadius(8)
                         }
+                    }
+
+                    // Security Type Picker (WPA3 Support)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("SECURITY PROTOCOL")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(GlassTheme.textTertiary)
+
+                        Picker("Security", selection: $appState.hotspotSecurityType) {
+                            ForEach(HotspotSecurityType.allCases) { type in
+                                Text(type.rawValue).tag(type)
+                            }
+                        }
+                        .pickerStyle(.segmented)
                     }
 
                     Divider().background(Color.white.opacity(0.08))

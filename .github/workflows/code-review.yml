@@ -1,0 +1,36 @@
+name: Open Code Review & Lint
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  code-review:
+    name: Automated Code Review & Static Analysis
+    runs-on: macos-14
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Review Changes
+        uses: reviewdog/action-actionlint@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          reporter: github-pr-review
+          fail_on_error: false
+
+      - name: Verify Coding Standards & Security
+        run: |
+          echo "==> Running security and coding standards verification..."
+          # Scan for secrets or sensitive private tokens
+          if grep -rnE "ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|AIza[0-9A-Za-z_-]{35}" Sources/ ; then
+            echo "::error::Hardcoded credentials or API tokens detected in Sources!"
+            exit 1
+          fi
+          echo "==> Code review static analysis PASSED."

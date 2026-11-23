@@ -6,6 +6,7 @@ extension Tag {
     @Tag public static var tier2: Self
     @Tag public static var tier3: Self
     @Tag public static var tier4: Self
+    @Tag public static var tier5: Self
 
     // MARK: - Milestones
     @Tag public static var m1_foundation: Self

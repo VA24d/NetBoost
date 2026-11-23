@@ -55,6 +55,32 @@ public struct ToolExecutionLog: Identifiable, Sendable, Equatable {
     }
 }
 
+// MARK: - Customization Enums
+
+public enum MenuBarIconStyle: String, CaseIterable, Identifiable, Sendable, Codable {
+    case iconAndSpeed = "Icon + Speed"
+    case compactSpeed = "Compact Speed"
+    case minimalBadge = "Minimal Badge"
+
+    public var id: String { rawValue }
+}
+
+public enum AppLogoStyle: String, CaseIterable, Identifiable, Sendable, Codable {
+    case sapphireLightning = "Sapphire Bolt"
+    case liquidWaveform = "Liquid Waveform"
+    case networkCore = "Network Core"
+
+    public var id: String { rawValue }
+
+    public var iconName: String {
+        switch self {
+        case .sapphireLightning: return "bolt.horizontal.circle.fill"
+        case .liquidWaveform: return "waveform.path.ecg"
+        case .networkCore: return "network"
+        }
+    }
+}
+
 // MARK: - AppState Central Coordinator
 
 @MainActor
@@ -88,12 +114,28 @@ public final class AppState: ObservableObject {
     // MARK: - Hotspot State
     @Published public var isHotspotActive: Bool = false
     @Published public var hotspotConfig: HotspotConfiguration = .default
-    @Published public var hotspotSSID: String = "NetBoost-Hotspot"
-    @Published public var hotspotPassword: String = "CampusNet2026!"
+    @Published public var hotspotSSID: String = "NetBoost-Hotspot" {
+        didSet { hotspotConfig.ssid = hotspotSSID }
+    }
+    @Published public var hotspotPassword: String = "CampusNet2026!" {
+        didSet { hotspotConfig.password = hotspotPassword }
+    }
+    @Published public var hotspotSecurityType: HotspotSecurityType = .wpa2Wpa3Transition {
+        didSet { hotspotConfig.securityType = hotspotSecurityType }
+    }
     @Published public var connectedClients: [HotspotClient] = []
     @Published public var upstreamInterface: String = "en10"
     @Published public var downstreamInterface: String = "en0"
     @Published public var hotspotError: String? = nil
+
+    // MARK: - Customization Options (Logo & Status Bar)
+    @Published public var menuBarIconStyle: MenuBarIconStyle = .iconAndSpeed
+    @Published public var appLogoStyle: AppLogoStyle = .sapphireLightning
+
+    // Private tracking for hardware interface throughput
+    private var lastInterfaceIn: UInt64 = 0
+    private var lastInterfaceOut: UInt64 = 0
+    private var lastInterfaceSampleTime: Date = Date()
 
     public var canEnableHotspot: Bool {
         upstreamInterface == "en10" || activeEnvironment.isCampusLAN || (activeEnvironment.primaryInterface == "en10")
@@ -208,10 +250,17 @@ public final class AppState: ObservableObject {
             alpha: 0.25
         )
 
-        menuBarThroughputText = SpeedFormatter.formatMenuBarThroughput(
-            up: smoothedUploadBps,
-            down: smoothedDownloadBps
-        )
+        switch menuBarIconStyle {
+        case .iconAndSpeed:
+            menuBarThroughputText = SpeedFormatter.formatMenuBarThroughput(
+                up: smoothedUploadBps,
+                down: smoothedDownloadBps
+            )
+        case .compactSpeed:
+            menuBarThroughputText = "↓ \(SpeedFormatter.formatCompact(smoothedDownloadBps)) ↑ \(SpeedFormatter.formatCompact(smoothedUploadBps))"
+        case .minimalBadge:
+            menuBarThroughputText = ""
+        }
     }
 
     public func updateEnvironment(_ state: NetworkEnvironmentState) {
@@ -298,6 +347,13 @@ public final class AppState: ObservableObject {
             appendRepairLog("Hotspot started sharing \(upstreamInterface) -> \(downstreamInterface)")
         }
         hotspotError = nil
+    }
+
+    public func openSystemSharingSettings() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["x-apple.systempreferences:com.apple.Sharing-Settings.extension"]
+        try? process.run()
     }
 
     public func refreshHotspotClients() async {
@@ -576,12 +632,21 @@ public final class AppState: ObservableObject {
     // MARK: - Background Tasks Implementation
 
     public func startBackgroundTasks() {
-        // 1. Throughput Polling (1 second) with EMA smoothing
+        // 1. Throughput Polling (1 second) with EMA smoothing & hardware byte counters
         throughputTimerTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 guard let self = self else { break }
                 await MainActor.run {
+                    let now = Date()
+                    let dt = max(0.2, now.timeIntervalSince(self.lastInterfaceSampleTime))
+                    self.lastInterfaceSampleTime = now
+
+                    let counters = DarwinSocketHelper.getInterfaceBytes(for: self.primaryInterface.isEmpty ? nil : self.primaryInterface)
+
+                    var instDown: Double = 0
+                    var instUp: Double = 0
+
                     if self.isProxyActive {
                         let connections = self.proxyDispatcher.activeConnections
                         var bytesUp: Double = 0
@@ -590,10 +655,22 @@ public final class AppState: ObservableObject {
                             bytesUp += Double(conn.bytesWritten)
                             bytesDown += Double(conn.bytesRead)
                         }
-                        self.updateSpeeds(download: bytesDown, upload: bytesUp)
+                        instDown = bytesDown
+                        instUp = bytesUp
                     } else if let task = self.activeDownloadTask {
-                        self.updateSpeeds(download: task.speedBytesPerSec, upload: 0)
+                        instDown = task.speedBytesPerSec
+                        instUp = 0
+                    } else if self.lastInterfaceIn > 0 && counters.inputBytes >= self.lastInterfaceIn {
+                        let deltaIn = counters.inputBytes - self.lastInterfaceIn
+                        let deltaOut = counters.outputBytes >= self.lastInterfaceOut ? (counters.outputBytes - self.lastInterfaceOut) : 0
+                        instDown = Double(deltaIn) / dt
+                        instUp = Double(deltaOut) / dt
                     }
+
+                    self.lastInterfaceIn = counters.inputBytes
+                    self.lastInterfaceOut = counters.outputBytes
+
+                    self.updateSpeeds(download: instDown, upload: instUp)
                 }
             }
         }

@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import Network
+import Darwin
 
 public enum TestAssertions {
 
@@ -51,52 +52,28 @@ public enum TestAssertions {
 
     /// Verifies if a local TCP port is reachable via loopback.
     public static func isLocalPortReachable(port: UInt16, timeout: TimeInterval = 2.0) async -> Bool {
-        final class ResumeGuard: @unchecked Sendable {
-            private let lock = NSLock()
-            private var isResumed = false
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr)
 
-            func resumeOnce(continuation: CheckedContinuation<Bool, Never>, returning value: Bool) -> Bool {
-                lock.lock()
-                defer { lock.unlock() }
-                guard !isResumed else { return false }
-                isResumed = true
-                continuation.resume(returning: value)
-                return true
-            }
-        }
-
-        return await withCheckedContinuation { continuation in
-            let guardBox = ResumeGuard()
-            let endpoint = NWEndpoint.hostPort(
-                host: NWEndpoint.Host("127.0.0.1"),
-                port: NWEndpoint.Port(rawValue: port)!
-            )
-            let params = NWParameters.tcp
-            let connection = NWConnection(to: endpoint, using: params)
-
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    if guardBox.resumeOnce(continuation: continuation, returning: true) {
-                        connection.cancel()
+        let start = Date()
+        while Date().timeIntervalSince(start) < timeout {
+            let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+            if fd >= 0 {
+                let res = withUnsafePointer(to: &addr) { ptr in
+                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                        Darwin.connect(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
                     }
-                case .failed, .cancelled:
-                    if guardBox.resumeOnce(continuation: continuation, returning: false) {
-                        connection.cancel()
-                    }
-                default:
-                    break
+                }
+                Darwin.close(fd)
+                if res == 0 {
+                    return true
                 }
             }
-
-            connection.start(queue: .global())
-
-            Task {
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                if guardBox.resumeOnce(continuation: continuation, returning: false) {
-                    connection.cancel()
-                }
-            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
         }
+        return false
     }
 }

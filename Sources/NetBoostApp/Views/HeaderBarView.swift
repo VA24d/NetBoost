@@ -52,16 +52,20 @@ public struct HeaderBarView: View {
                 color: environmentColor(appState.activeEnvironment)
             )
 
-            // Auto-Fix Button & Progress / Summary
-            HStack(spacing: 10) {
+            // Auto-Fix Button & Compact Summary Pill
+            HStack(spacing: 8) {
                 if let summary = appState.autoFixSummary {
-                    Text(summary)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(GlassTheme.emeraldGreen)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(GlassTheme.emeraldGreen.opacity(0.12))
-                        .clipShape(Capsule())
+                    HStack(spacing: 4) {
+                        Image(systemName: summary.contains("error") ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                        Text(summary.contains("error") ? "Fix Failed" : "Fixed")
+                            .font(.system(size: 11, weight: .bold))
+                    }
+                    .foregroundColor(summary.contains("error") ? GlassTheme.redAlert : GlassTheme.emeraldGreen)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background((summary.contains("error") ? GlassTheme.redAlert : GlassTheme.emeraldGreen).opacity(0.12))
+                    .clipShape(Capsule())
+                    .help(summary)
                 }
 
                 Button {
@@ -78,12 +82,52 @@ public struct HeaderBarView: View {
                             Image(systemName: "bolt.fill")
                                 .font(.system(size: 12))
                         }
-                        Text(appState.isAutoFixRunning ? "Fixing Network..." : "⚡ Auto-Fix Campus Net")
+                        Text(appState.isAutoFixRunning ? "Fixing..." : "⚡ Auto-Fix")
                             .font(.system(size: 12, weight: .semibold, design: .rounded))
                     }
                 }
                 .buttonStyle(GlowingButtonStyle(accentColor: GlassTheme.amberWarning, isProminent: true))
                 .disabled(appState.isAutoFixRunning)
+
+                // Status Bar & Logo Customization Menu
+                Menu {
+                    Section("Status Bar Style") {
+                        ForEach(MenuBarIconStyle.allCases) { style in
+                            Button {
+                                appState.menuBarIconStyle = style
+                            } label: {
+                                HStack {
+                                    Text(style.rawValue)
+                                    if appState.menuBarIconStyle == style {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Section("App Logo Style") {
+                        ForEach(AppLogoStyle.allCases) { style in
+                            Button {
+                                appState.appLogoStyle = style
+                            } label: {
+                                HStack {
+                                    Text(style.rawValue)
+                                    if appState.appLogoStyle == style {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "paintpalette.fill")
+                        .font(.system(size: 13))
+                        .foregroundColor(GlassTheme.textSecondary)
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 24, height: 24)
+                .help("Customize Status Bar and Logo style")
             }
         }
         .padding(.horizontal, 16)

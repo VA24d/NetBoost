@@ -7,7 +7,7 @@ struct Tier1_24_CaptivePortalTests {
 
     struct CaptiveDetector {
         static func evaluate(probeURL: URL) async throws -> (status: CaptivePortalStatus, redirectURL: String?) {
-            var request = URLRequest(url: probeURL)
+            let request = URLRequest(url: probeURL)
             // Prevent auto-following redirects so we can inspect 302 Location
             let config = URLSessionConfiguration.default
             let delegate = RedirectCatcherDelegate()

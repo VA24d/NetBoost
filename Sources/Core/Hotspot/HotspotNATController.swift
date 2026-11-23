@@ -45,20 +45,14 @@ public final class HotspotNATController: HotspotControllerProtocol, @unchecked S
         }
     }
 
-    /// Starts hotspot sharing: enables IP forwarding, creates IP alias, and loads isolated PF NAT anchor.
+    /// Starts hotspot sharing: enables IP forwarding, creates IP alias, and loads isolated PF NAT anchor in a single elevated command.
     public func startHotspot(
         upstreamInterface: String,
         downstreamInterface: String
     ) async throws {
         updateConfig(upstream: upstreamInterface, downstream: downstreamInterface)
 
-        // 1. Enable Kernel IP forwarding
-        try await setIPForwarding(true)
-
-        // 2. Configure Gateway IP alias on downstream interface (192.168.2.1/24)
-        try await configureDownstreamAlias(interface: downstreamInterface, ip: configuration.gateway)
-
-        // 3. Generate and load isolated PF NAT anchor rules
+        // Generate and write isolated PF NAT anchor rules
         let tempRuleFile = NSTemporaryDirectory() + "netboost_hotspot_\(UUID().uuidString).pf"
         let rules = pfManager.generateNATRule()
         try rules.write(toFile: tempRuleFile, atomically: true, encoding: .utf8)
@@ -70,52 +64,60 @@ public final class HotspotNATController: HotspotControllerProtocol, @unchecked S
             throw PrivilegeError.executionFailed("PF NAT rule validation failed: \(dryRunOutput.stderr)")
         }
 
-        // Load anchor and enable PF
-        let loadCmd = pfManager.makeLoadAnchorCommand(ruleFile: tempRuleFile)
-        let enableCmd = pfManager.makeEnablePFCommand()
+        let sysctlCmd = "/usr/sbin/sysctl -w net.inet.ip.forwarding=1"
+        let aliasCmd = "/sbin/ifconfig \(downstreamInterface) alias \(configuration.gateway) netmask 255.255.255.0"
+        let loadAnchorCmd = "/sbin/pfctl -a \(pfManager.anchorName) -f \(tempRuleFile)"
+        let enablePFCmd = "/sbin/pfctl -e 2>/dev/null || true"
+        let powerOnCmd = "/usr/sbin/networksetup -setairportpower \(downstreamInterface) on 2>/dev/null || true"
+        let natPlistCmd = "/usr/bin/defaults write /Library/Preferences/SystemConfiguration/com.apple.nat NAT -dict AirPort \"{ Channel = 0; Enabled = 1; NetworkName = \\\"\(configuration.ssid)\\\"; NetworkPassword = \\\"\(configuration.password)\\\"; }\" Enabled -int 1 PrimaryInterface \"\(upstreamInterface)\" SharingInterfaces \"(\\\"\(downstreamInterface)\\\")\" 2>/dev/null || true"
+        let kickstartSharingCmd = "(/bin/launchctl kickstart -k system/com.apple.NetworkSharing 2>/dev/null || /bin/launchctl start com.apple.NetworkSharing 2>/dev/null || true)"
+
+        let combinedStart = "\(sysctlCmd) && \(aliasCmd) && \(loadAnchorCmd) && (\(enablePFCmd)) && (\(powerOnCmd)) && (\(natPlistCmd)) && (\(kickstartSharingCmd))"
 
         if PrivilegeHelper.isRoot {
-            _ = try await ShellCommand.run(loadCmd[0], arguments: Array(loadCmd.dropFirst()))
-            _ = try await ShellCommand.run(enableCmd[0], arguments: Array(enableCmd.dropFirst()))
+            _ = try await ShellCommand.runBash(combinedStart)
         } else {
             do {
-                _ = try await PrivilegeHelper.runElevated(script: "\(loadCmd.joined(separator: " ")) && \(enableCmd.joined(separator: " "))")
+                _ = try await PrivilegeHelper.runElevated(script: combinedStart)
+            } catch PrivilegeError.elevationDenied {
+                throw PrivilegeError.elevationDenied
             } catch {
                 _ = try? await PrivilegeHelper.runHelper(action: "pf-load-anchor", arguments: [pfManager.anchorName, tempRuleFile])
                 _ = try? await PrivilegeHelper.runHelper(action: "pf-enable")
+                _ = try? await PrivilegeHelper.runHelper(action: "set-ip-forwarding", arguments: ["1"])
             }
         }
 
         setActiveState(true)
     }
 
-    /// Stops hotspot sharing: atomically flushes NetBoost PF anchor and restores sysctl IP forwarding.
+    /// Stops hotspot sharing: atomically flushes NetBoost PF anchor, removes alias, and restores sysctl IP forwarding.
     public func stopHotspot() async throws {
-        // 1. Flush NetBoost PF anchor only
-        let flushCmd = pfManager.makeFlushAnchorCommand()
+        let flushCmd = "/sbin/pfctl -a \(pfManager.anchorName) -F all 2>/dev/null || true"
+        let unaliasCmd = "/sbin/ifconfig \(configuration.interfaceName) -alias \(configuration.gateway) 2>/dev/null || true"
+        let sysctlCmd = "/usr/sbin/sysctl -w net.inet.ip.forwarding=0 2>/dev/null || true"
+        let stopSharingCmd = "/bin/launchctl stop com.apple.NetworkSharing 2>/dev/null || true"
+        let disableNatPlistCmd = "/usr/bin/defaults write /Library/Preferences/SystemConfiguration/com.apple.nat NAT -dict-add Enabled 0 2>/dev/null || true"
+
+        let combinedStop = "\(flushCmd) ; \(unaliasCmd) ; \(sysctlCmd) ; (\(stopSharingCmd)) ; (\(disableNatPlistCmd))"
+
         if PrivilegeHelper.isRoot {
-            _ = try? await ShellCommand.run(flushCmd[0], arguments: Array(flushCmd.dropFirst()))
+            _ = try? await ShellCommand.runBash(combinedStop)
         } else {
             do {
-                _ = try await PrivilegeHelper.runElevated(script: flushCmd[0], arguments: Array(flushCmd.dropFirst()))
+                _ = try await PrivilegeHelper.runElevated(script: combinedStop)
+            } catch PrivilegeError.elevationDenied {
+                throw PrivilegeError.elevationDenied
             } catch {
                 _ = try? await PrivilegeHelper.runHelper(action: "pf-flush-anchor", arguments: [pfManager.anchorName])
+                _ = try? await PrivilegeHelper.runHelper(action: "set-ip-forwarding", arguments: ["0"])
             }
         }
 
-        // 2. Clean up temporary rule file
         if let path = ruleFilePath {
             try? FileManager.default.removeItem(atPath: path)
             self.ruleFilePath = nil
         }
-
-        // 3. Remove downstream IP alias
-        let iface = configuration.interfaceName
-        let ip = configuration.gateway
-        _ = try? await ShellCommand.run("/sbin/ifconfig", arguments: [iface, "-alias", ip])
-
-        // 4. Disable IP forwarding
-        try? await setIPForwarding(false)
 
         setActiveState(false)
     }

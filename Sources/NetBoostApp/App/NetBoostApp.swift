@@ -1,11 +1,22 @@
+import AppKit
 import SwiftUI
 import NetBoostCore
 
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApplication.shared.setActivationPolicy(.regular)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+}
+
 @main
 public struct NetBoostApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var appState = AppState()
 
-    public init() {}
+    public init() {
+        NSApplication.shared.setActivationPolicy(.regular)
+    }
 
     public var body: some Scene {
         WindowGroup("NetBoost", id: "main") {
@@ -24,8 +35,10 @@ public struct NetBoostApp: App {
                 .environmentObject(appState)
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: "bolt.horizontal.circle.fill")
-                Text(appState.menuBarThroughputText)
+                Image(systemName: appState.appLogoStyle.iconName)
+                if !appState.menuBarThroughputText.isEmpty {
+                    Text(appState.menuBarThroughputText)
+                }
             }
         }
         .menuBarExtraStyle(.window)

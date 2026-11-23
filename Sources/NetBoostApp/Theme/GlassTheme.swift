@@ -14,6 +14,7 @@ public enum GlassTheme {
     public static let violetAccentHex = "#D500F9"
     public static let violetChunksHex = "#B026FF"
     public static let backgroundDarkHex = "#0D1117"
+    public static let surfaceBackgroundHex = "#161B22"
     public static let redAlertHex = "#FF1744"
 
     // SwiftUI Color Tokens
@@ -27,6 +28,7 @@ public enum GlassTheme {
     public static let violetAccent = Color(red: 0.65, green: 0.25, blue: 0.95)
     public static let violetChunks = Color(hex: violetChunksHex)
     public static let backgroundDark = Color(hex: backgroundDarkHex)
+    public static let surfaceBackground = Color(hex: surfaceBackgroundHex)
     public static let redAlert = Color(hex: redAlertHex)
     public static let textSecondary = Color.white.opacity(0.7)
     public static let textTertiary = Color.white.opacity(0.45)
@@ -217,6 +219,15 @@ public enum SpeedFormatter {
             return String(format: "%.1f MB/s", bytesPerSec / (1024 * 1024))
         } else {
             return String(format: "%.2f GB/s", bytesPerSec / (1024 * 1024 * 1024))
+        }
+    }
+
+    public static func formatCompact(_ bytesPerSec: Double) -> String {
+        guard bytesPerSec > 0 else { return "0 B/s" }
+        if bytesPerSec < 1024 * 1024 {
+            return String(format: "%.0f KB/s", bytesPerSec / 1024)
+        } else {
+            return String(format: "%.1f MB/s", bytesPerSec / (1024 * 1024))
         }
     }
 

@@ -114,6 +114,40 @@ public struct MenuBarPopupView: View {
                 .disabled(appState.isAutoFixRunning)
             }
 
+            // Status Bar & Logo Pickers
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Menu Bar Style:")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(GlassTheme.textSecondary)
+                    Spacer()
+                    Picker("", selection: $appState.menuBarIconStyle) {
+                        ForEach(MenuBarIconStyle.allCases) { s in
+                            Text(s.rawValue).tag(s)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 140)
+                }
+
+                HStack {
+                    Text("App Logo Style:")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(GlassTheme.textSecondary)
+                    Spacer()
+                    Picker("", selection: $appState.appLogoStyle) {
+                        ForEach(AppLogoStyle.allCases) { l in
+                            Text(l.rawValue).tag(l)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 140)
+                }
+            }
+            .padding(8)
+            .background(Color.white.opacity(0.04))
+            .cornerRadius(8)
+
             Divider().background(Color.white.opacity(0.1))
 
             // App Window & Lifecycle Controls
