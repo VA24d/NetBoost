@@ -113,20 +113,55 @@ public final class AppState: ObservableObject {
 
     // MARK: - Hotspot State
     @Published public var isHotspotActive: Bool = false
+    @Published public var isRadioBroadcasting: Bool = false
     @Published public var hotspotConfig: HotspotConfiguration = .default
-    @Published public var hotspotSSID: String = "NetBoost-Hotspot" {
-        didSet { hotspotConfig.ssid = hotspotSSID }
+    @Published public var hotspotSSID: String = "NetBoost" {
+        didSet {
+            hotspotConfig.ssid = hotspotSSID
+            hotspotController.updateConfiguration(hotspotConfig)
+        }
     }
-    @Published public var hotspotPassword: String = "CampusNet2026!" {
-        didSet { hotspotConfig.password = hotspotPassword }
+    @Published public var hotspotPassword: String = "12345678" {
+        didSet {
+            hotspotConfig.password = hotspotPassword
+            hotspotController.updateConfiguration(hotspotConfig)
+        }
     }
     @Published public var hotspotSecurityType: HotspotSecurityType = .wpa2Wpa3Transition {
-        didSet { hotspotConfig.securityType = hotspotSecurityType }
+        didSet {
+            hotspotConfig.securityType = hotspotSecurityType
+            hotspotController.updateConfiguration(hotspotConfig)
+        }
     }
     @Published public var connectedClients: [HotspotClient] = []
     @Published public var upstreamInterface: String = "en10"
     @Published public var downstreamInterface: String = "en0"
     @Published public var hotspotError: String? = nil
+
+    public var isWiFiConnectedToExternalNetwork: Bool {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return false }
+        defer { freeifaddrs(ifaddr) }
+
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let ptr = cursor {
+            let name = String(cString: ptr.pointee.ifa_name)
+            if name == "en0", let addr = ptr.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) {
+                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(addr, socklen_t(addr.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
+                    let ip = hostname.withUnsafeBufferPointer { ptr in
+                        guard let base = ptr.baseAddress else { return "" }
+                        return String(cString: base)
+                    }
+                    if ip != "192.168.2.1" && !ip.hasPrefix("127.") {
+                        return true
+                    }
+                }
+            }
+            cursor = ptr.pointee.ifa_next
+        }
+        return false
+    }
 
     // MARK: - Customization Options (Logo & Status Bar)
     @Published public var menuBarIconStyle: MenuBarIconStyle = .iconAndSpeed
@@ -347,16 +382,22 @@ public final class AppState: ObservableObject {
         if isHotspotActive {
             try await hotspotController.stopHotspot()
             isHotspotActive = false
+            isRadioBroadcasting = false
             connectedClients = []
             hotspotConfig.isActive = false
             appendRepairLog("Hotspot stopped on \(downstreamInterface)")
         } else {
-            try await hotspotController.startHotspot(
-                upstreamInterface: upstreamInterface,
-                downstreamInterface: downstreamInterface
-            )
+            hotspotConfig.upstreamInterface = upstreamInterface
+            hotspotConfig.interfaceName = downstreamInterface
+            hotspotConfig.ssid = hotspotSSID
+            hotspotConfig.password = hotspotPassword
+            hotspotConfig.securityType = hotspotSecurityType
+            hotspotController.updateConfiguration(hotspotConfig)
+
+            try await hotspotController.startHotspot(configuration: hotspotConfig)
             isHotspotActive = true
             hotspotConfig.isActive = true
+            isRadioBroadcasting = await hotspotController.isRadioBroadcasting()
             connectedClients = await hotspotController.connectedClients()
             appendRepairLog("Hotspot started sharing \(upstreamInterface) -> \(downstreamInterface)")
         }
@@ -372,6 +413,7 @@ public final class AppState: ObservableObject {
 
     public func refreshHotspotClients() async {
         guard isHotspotActive else { return }
+        isRadioBroadcasting = await hotspotController.isRadioBroadcasting()
         connectedClients = await hotspotController.connectedClients()
     }
 

@@ -3,8 +3,23 @@ import Foundation
 /// Protocol governing 802.1X Hotspot Sharing lifecycle and connected clients.
 public protocol HotspotControllerProtocol: Sendable {
     func startHotspot(upstreamInterface: String, downstreamInterface: String) async throws
+    func startHotspot(configuration: HotspotConfiguration) async throws
+    func updateConfiguration(_ config: HotspotConfiguration)
+    func isRadioBroadcasting() async -> Bool
     func stopHotspot() async throws
     func connectedClients() async -> [HotspotClient]
+}
+
+public extension HotspotControllerProtocol {
+    func startHotspot(configuration: HotspotConfiguration) async throws {
+        try await startHotspot(upstreamInterface: configuration.upstreamInterface, downstreamInterface: configuration.interfaceName)
+    }
+
+    func updateConfiguration(_ config: HotspotConfiguration) {}
+
+    func isRadioBroadcasting() async -> Bool {
+        DarwinSocketHelper.isInterfaceActive("bridge100") || DarwinSocketHelper.isInterfaceActive("ap1")
+    }
 }
 
 /// Manages kernel IP forwarding, interface IP alias, and isolated Packet Filter NAT anchor rules.
@@ -31,6 +46,16 @@ public final class HotspotNATController: HotspotControllerProtocol, @unchecked S
         self.sysctlController = SysctlForwardingController.self
     }
 
+    public func updateConfiguration(_ newConfig: HotspotConfiguration) {
+        lock.withLock {
+            self.configuration = newConfig
+        }
+    }
+
+    public func isRadioBroadcasting() async -> Bool {
+        DarwinSocketHelper.isInterfaceActive("bridge100") || DarwinSocketHelper.isInterfaceActive("ap1")
+    }
+
     private func updateConfig(upstream: String, downstream: String) {
         lock.withLock {
             configuration.upstreamInterface = upstream
@@ -43,6 +68,15 @@ public final class HotspotNATController: HotspotControllerProtocol, @unchecked S
             isActive = active
             configuration.isActive = active
         }
+    }
+
+    /// Starts hotspot sharing using explicit configuration.
+    public func startHotspot(configuration: HotspotConfiguration) async throws {
+        updateConfiguration(configuration)
+        try await startHotspot(
+            upstreamInterface: configuration.upstreamInterface,
+            downstreamInterface: configuration.interfaceName
+        )
     }
 
     /// Starts hotspot sharing: enables IP forwarding, creates IP alias, and loads isolated PF NAT anchor in a single elevated command.
@@ -77,7 +111,7 @@ public final class HotspotNATController: HotspotControllerProtocol, @unchecked S
         let loadAnchorCmd = "/sbin/pfctl -a \(pfManager.anchorName) -f \(tempRuleFile)"
         let enablePFCmd = "/sbin/pfctl -e 2>/dev/null || true"
         let powerOnCmd = "/usr/sbin/networksetup -setairportpower \(downstreamInterface) on 2>/dev/null || true"
-        let natPlistCmd = "/usr/bin/defaults write /Library/Preferences/SystemConfiguration/com.apple.nat NAT -dict AirPort \"{ Channel = 0; Enabled = 1; NetworkName = \\\"\(configuration.ssid)\\\"; NetworkPassword = \\\"\(configuration.password)\\\"; }\" Enabled -int 1 PrimaryInterface \"\(upstreamInterface)\" SharingInterfaces \"(\\\"\(downstreamInterface)\\\")\" 2>/dev/null || true"
+        let natPlistCmd = "/usr/bin/defaults write /Library/Preferences/SystemConfiguration/com.apple.nat NAT -dict AirPort \"{ Channel = 0; Enabled = 1; NetworkName = \\\"\(configuration.ssid)\\\"; NetworkPassword = \\\"\(configuration.password)\\\"; }\" Enabled -int 1 PrimaryInterface \"\(upstreamInterface)\" SharingInterfaces \"(\\\"AirPort\\\", \\\"\(downstreamInterface)\\\")\" 2>/dev/null || true"
         let kickstartSharingCmd = "(/bin/launchctl kickstart -k system/com.apple.NetworkSharing 2>/dev/null || /bin/launchctl start com.apple.NetworkSharing 2>/dev/null || true)"
 
         let combinedStart = "\(sysctlCmd) && \(aliasCmd) && \(loadAnchorCmd) && (\(enablePFCmd)) && (\(powerOnCmd)) && (\(natPlistCmd)) && (\(kickstartSharingCmd))"

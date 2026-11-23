@@ -49,6 +49,7 @@ struct AppStateActionDelegationTests {
         #expect(mockVPN.lastProfileName == "macos.ovpn")
 
         // Immediate toggle (< 0.5s): Debounced, no action
+        appState.lastVPNToggleTime = Date()
         try await appState.toggleVPN()
         #expect(appState.vpnStatus == .connected) // Still connected because debounced
 

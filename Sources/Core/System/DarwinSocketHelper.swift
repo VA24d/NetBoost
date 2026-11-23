@@ -167,4 +167,26 @@ public final class DarwinSocketHelper: Sendable {
         }
         return InterfaceByteCounters(inputBytes: totalIn, outputBytes: totalOut)
     }
+
+    /// Checks if a BSD network interface exists and has active flags (IFF_UP and IFF_RUNNING).
+    public static func isInterfaceActive(_ bsdName: String) -> Bool {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return false }
+        defer { freeifaddrs(ifaddr) }
+
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let ptr = cursor {
+            let name = String(cString: ptr.pointee.ifa_name)
+            if name == bsdName {
+                let flags = Int32(ptr.pointee.ifa_flags)
+                let isUp = (flags & IFF_UP) != 0
+                let isRunning = (flags & IFF_RUNNING) != 0
+                if isUp && isRunning {
+                    return true
+                }
+            }
+            cursor = ptr.pointee.ifa_next
+        }
+        return false
+    }
 }

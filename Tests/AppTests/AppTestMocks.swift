@@ -209,8 +209,23 @@ public final class MockAppHotspotController: HotspotControllerProtocol, @uncheck
     public var stopCalled = false
     public var shouldThrowError = false
     public var mockClients: [HotspotClient] = []
+    public var lastConfig: HotspotConfiguration?
+    public var mockIsRadioBroadcasting: Bool = false
 
     public init() {}
+
+    public func updateConfiguration(_ config: HotspotConfiguration) {
+        lastConfig = config
+    }
+
+    public func isRadioBroadcasting() async -> Bool {
+        mockIsRadioBroadcasting
+    }
+
+    public func startHotspot(configuration: HotspotConfiguration) async throws {
+        lastConfig = configuration
+        try await startHotspot(upstreamInterface: configuration.upstreamInterface, downstreamInterface: configuration.interfaceName)
+    }
 
     public func startHotspot(upstreamInterface: String, downstreamInterface: String) async throws {
         if shouldThrowError {
