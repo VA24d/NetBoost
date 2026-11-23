@@ -107,6 +107,10 @@ public final class ShellCommand: Sendable {
                 let stderrStr = String(data: stderrData, encoding: .utf8) ?? ""
                 let duration = Date().timeIntervalSince(startTime)
 
+                if Task.isCancelled || duration >= timeout || process.terminationReason == .uncaughtSignal {
+                    throw ShellError.timedOut(timeout: timeout)
+                }
+
                 return ShellOutput(
                     stdout: stdoutStr,
                     stderr: stderrStr,
