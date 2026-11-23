@@ -87,6 +87,9 @@ struct Tier2_04_CoreModelsBoundariesTests {
             activeIssues: []
         )
 
+        var completedTasks = 0
+        var gatheredResults: [String] = []
+
         await withTaskGroup(of: String.self) { group in
             for i in 0..<20 {
                 group.addTask {
@@ -94,6 +97,20 @@ struct Tier2_04_CoreModelsBoundariesTests {
                     return "\(copy.interfaces.first?.bsdName ?? "")_\(i)"
                 }
             }
+
+            for await result in group {
+                #expect(result.starts(with: "en0_"))
+                gatheredResults.append(result)
+                completedTasks += 1
+            }
+        }
+
+        #expect(completedTasks == 20)
+        #expect(gatheredResults.count == 20)
+        let uniqueResults = Set(gatheredResults)
+        #expect(uniqueResults.count == 20)
+        for i in 0..<20 {
+            #expect(uniqueResults.contains("en0_\(i)"))
         }
     }
 }

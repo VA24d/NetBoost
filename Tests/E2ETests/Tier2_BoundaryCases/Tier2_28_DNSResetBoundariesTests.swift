@@ -54,8 +54,13 @@ struct Tier2_28_DNSResetBoundariesTests {
     }
 
     @Test("T2-F28-05: MockProcessRunner intercepts setdnsservers command")
-    func testMockProcessRunnerDNSResetInterception() {
-        mockRunner.registerStub(commandContaining: "networksetup -setdnsservers Wi-Fi Empty", stdout: "", exitCode: 0)
+    func testMockProcessRunnerDNSResetInterception() async throws {
+        mockRunner.registerStub(commandContaining: "networksetup -setdnsservers Wi-Fi Empty", stdout: "DNS servers reset\n", exitCode: 0)
         #expect(mockRunner.didExecute(commandContaining: "networksetup -setdnsservers") == false)
+
+        let output = try await mockRunner.run("networksetup", arguments: ["-setdnsservers", "Wi-Fi", "Empty"])
+        #expect(output.succeeded)
+        #expect(output.stdout.contains("DNS servers reset"))
+        #expect(mockRunner.didExecute(commandContaining: "networksetup -setdnsservers") == true)
     }
 }

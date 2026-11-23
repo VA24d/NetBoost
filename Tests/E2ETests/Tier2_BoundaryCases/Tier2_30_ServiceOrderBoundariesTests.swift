@@ -91,8 +91,13 @@ struct Tier2_30_ServiceOrderBoundariesTests {
     }
 
     @Test("T2-F30-05: MockProcessRunner intercepts ordernetworkservices command")
-    func testMockProcessRunnerServiceOrder() {
-        mockRunner.registerStub(commandContaining: "networksetup -ordernetworkservices", stdout: "", exitCode: 0)
+    func testMockProcessRunnerServiceOrder() async throws {
+        mockRunner.registerStub(commandContaining: "networksetup -ordernetworkservices", stdout: "Service order updated\n", exitCode: 0)
         #expect(mockRunner.didExecute(commandContaining: "networksetup -ordernetworkservices") == false)
+
+        let output = try await mockRunner.run("networksetup", arguments: ["-ordernetworkservices", "USB 10/100 LAN", "Wi-Fi"])
+        #expect(output.succeeded)
+        #expect(output.stdout.contains("Service order updated"))
+        #expect(mockRunner.didExecute(commandContaining: "networksetup -ordernetworkservices") == true)
     }
 }

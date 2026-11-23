@@ -38,8 +38,13 @@ struct Tier2_33_PFNATAnchorBoundariesTests {
     }
 
     @Test("T2-F33-05: MockProcessRunner intercepts pfctl anchor commands")
-    func testMockProcessRunnerPFCTL() {
+    func testMockProcessRunnerPFCTL() async throws {
         mockRunner.registerStub(commandContaining: "pfctl -a netboost -F all", stdout: "rules cleared\n", exitCode: 0)
         #expect(mockRunner.didExecute(commandContaining: "pfctl -a netboost") == false)
+
+        let output = try await mockRunner.run("pfctl", arguments: ["-a", "netboost", "-F", "all"])
+        #expect(output.succeeded)
+        #expect(output.stdout.contains("rules cleared"))
+        #expect(mockRunner.didExecute(commandContaining: "pfctl -a netboost") == true)
     }
 }

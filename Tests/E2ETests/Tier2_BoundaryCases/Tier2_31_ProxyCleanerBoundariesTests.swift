@@ -53,11 +53,21 @@ struct Tier2_31_ProxyCleanerBoundariesTests {
     }
 
     @Test("T2-F31-05: MockProcessRunner intercepts proxy cleaner commands")
-    func testMockProcessRunnerProxyClean() {
-        mockRunner.registerStub(commandContaining: "networksetup -setautoproxystate Wi-Fi off", stdout: "", exitCode: 0)
-        mockRunner.registerStub(commandContaining: "networksetup -setwebproxystate Wi-Fi off", stdout: "", exitCode: 0)
+    func testMockProcessRunnerProxyClean() async throws {
+        mockRunner.registerStub(commandContaining: "networksetup -setautoproxystate Wi-Fi off", stdout: "Auto-proxy disabled\n", exitCode: 0)
+        mockRunner.registerStub(commandContaining: "networksetup -setwebproxystate Wi-Fi off", stdout: "Web proxy disabled\n", exitCode: 0)
 
         #expect(mockRunner.didExecute(commandContaining: "networksetup -setautoproxystate") == false)
         #expect(mockRunner.didExecute(commandContaining: "networksetup -setwebproxystate") == false)
+
+        let out1 = try await mockRunner.run("networksetup", arguments: ["-setautoproxystate", "Wi-Fi", "off"])
+        let out2 = try await mockRunner.run("networksetup", arguments: ["-setwebproxystate", "Wi-Fi", "off"])
+
+        #expect(out1.succeeded)
+        #expect(out1.stdout.contains("Auto-proxy disabled"))
+        #expect(out2.succeeded)
+        #expect(out2.stdout.contains("Web proxy disabled"))
+        #expect(mockRunner.didExecute(commandContaining: "networksetup -setautoproxystate") == true)
+        #expect(mockRunner.didExecute(commandContaining: "networksetup -setwebproxystate") == true)
     }
 }

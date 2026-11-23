@@ -26,12 +26,15 @@ struct PrivilegeHelperTests {
     func testHelperScriptUnprivilegedRejection() async throws {
         guard !PrivilegeHelper.isRoot else { return }
 
-        if let helperPath = PrivilegeHelper.locateHelperScript() {
-            // Running directly without sudo should exit with code 1 and error message
-            let output = try await ShellCommand.run(helperPath, arguments: ["status"])
-            #expect(output.exitCode != 0)
-            #expect(output.stderr.contains("must be run with root privileges"))
+        guard let helperPath = PrivilegeHelper.locateHelperScript() else {
+            Issue.record("Helper script not found")
+            return
         }
+
+        // Running directly without sudo should exit with code 1 and error message
+        let output = try await ShellCommand.run(helperPath, arguments: ["status"])
+        #expect(output.exitCode != 0)
+        #expect(output.stderr.contains("must be run with root privileges"))
     }
 
     @Test("Verify handleElevationResult throws elevationDenied on User canceled error")

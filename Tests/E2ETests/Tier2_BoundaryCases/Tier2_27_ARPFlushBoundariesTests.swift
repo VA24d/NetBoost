@@ -34,9 +34,14 @@ struct Tier2_27_ARPFlushBoundariesTests {
     }
 
     @Test("T2-F27-04: MockProcessRunner intercepts ARP table flush commands")
-    func testMockProcessRunnerARPInterception() {
+    func testMockProcessRunnerARPInterception() async throws {
         mockRunner.registerStub(commandContaining: "arp -d -a", stdout: "10.1.36.1 (10.1.36.1) deleted\n", exitCode: 0)
         #expect(mockRunner.didExecute(commandContaining: "arp -d") == false)
+
+        let output = try await mockRunner.run("arp", arguments: ["-d", "-a"])
+        #expect(output.succeeded)
+        #expect(output.stdout.contains("10.1.36.1 (10.1.36.1) deleted"))
+        #expect(mockRunner.didExecute(commandContaining: "arp -d") == true)
     }
 
     @Test("T2-F27-05: Flushing already empty ARP table handled cleanly")

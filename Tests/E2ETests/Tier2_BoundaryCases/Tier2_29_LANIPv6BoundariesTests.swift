@@ -55,8 +55,13 @@ struct Tier2_29_LANIPv6BoundariesTests {
     }
 
     @Test("T2-F29-05: MockProcessRunner intercepts setv6off command")
-    func testMockProcessRunnerSetV6Off() {
-        mockRunner.registerStub(commandContaining: "networksetup -setv6off Wi-Fi", stdout: "", exitCode: 0)
+    func testMockProcessRunnerSetV6Off() async throws {
+        mockRunner.registerStub(commandContaining: "networksetup -setv6off Wi-Fi", stdout: "IPv6 turned off for Wi-Fi\n", exitCode: 0)
         #expect(mockRunner.didExecute(commandContaining: "networksetup -setv6off") == false)
+
+        let output = try await mockRunner.run("networksetup", arguments: ["-setv6off", "Wi-Fi"])
+        #expect(output.succeeded)
+        #expect(output.stdout.contains("IPv6 turned off for Wi-Fi"))
+        #expect(mockRunner.didExecute(commandContaining: "networksetup -setv6off") == true)
     }
 }

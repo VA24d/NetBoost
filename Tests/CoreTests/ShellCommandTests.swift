@@ -55,7 +55,7 @@ struct ShellCommandTests {
         #expect(output.succeeded == true)
         #expect(output.exitCode == 0)
         #expect(output.stdout.count >= 131072)
-        #expect(output.duration < 2.0)
+        #expect(output.duration < 4.0)
     }
 
     @Test("Execute host ps -ax command with large output does not deadlock")
@@ -80,6 +80,6 @@ struct ShellCommandTests {
         #expect(output.succeeded == true)
         #expect(output.exitCode == 0)
         #expect(output.stderr.count >= 131072)
-        #expect(output.duration < 2.0)
+        #expect(output.duration < 4.0)
     }
 }

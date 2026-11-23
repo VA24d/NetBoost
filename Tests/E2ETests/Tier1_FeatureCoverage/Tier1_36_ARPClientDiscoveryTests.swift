@@ -22,14 +22,14 @@ struct Tier1_36_ARPClientDiscoveryTests {
                     let mac = String(remainder.split(separator: " ").first ?? "")
 
                     let lease = leases.first { $0.ipAddress == ip || $0.macAddress.lowercased() == mac.lowercased() }
-                    let hostname = lease != nil ? "iPad-Client" : nil
+                    let hostname = lease?.hostname
 
                     clients.append(HotspotClient(
                         macAddress: mac,
                         ipAddress: ip,
                         hostname: hostname,
-                        txBytes: 1024,
-                        rxBytes: 2048
+                        txBytes: 0,
+                        rxBytes: 0
                     ))
                 }
             }
@@ -63,7 +63,7 @@ struct Tier1_36_ARPClientDiscoveryTests {
     func testCorrelateWithDHCPLeases() {
         let mockARP = "? (192.168.2.15) at a4:83:e7:22:11:00 on en0 ifscope [ethernet]"
         let leases = [
-            DHCPLease(ipAddress: "192.168.2.15", macAddress: "a4:83:e7:22:11:00")
+            DHCPLease(ipAddress: "192.168.2.15", macAddress: "a4:83:e7:22:11:00", hostname: "iPad-Client")
         ]
 
         let clients = ARPClientScanner.parseHotspotClients(arpOutput: mockARP, leases: leases)

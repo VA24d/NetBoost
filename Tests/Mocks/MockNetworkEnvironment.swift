@@ -1,56 +1,8 @@
 import Foundation
+@_exported import NetBoostCore
 
-public enum NetworkEnvironmentState: Sendable, Equatable, Hashable {
-    case campusLAN(interface: String, ip: String, gateway: String, mtu: Int)
-    case cellularHotspot(interface: String, ip: String, gateway: String, mtu: Int)
-    case externalWiFi(interface: String, ip: String, gateway: String, mtu: Int)
-    case disconnected
-
-    public static var defaultCampusLAN: Self {
-        .campusLAN(interface: "en10", ip: "10.1.36.52", gateway: "10.1.36.1", mtu: 1500)
-    }
-
-    public static var defaultCellularHotspot: Self {
-        .cellularHotspot(interface: "en0", ip: "172.20.10.2", gateway: "172.20.10.1", mtu: 1280)
-    }
-
-    public static var defaultExternalWiFi: Self {
-        .externalWiFi(interface: "en0", ip: "192.168.1.100", gateway: "192.168.1.1", mtu: 1500)
-    }
-
-    public var isCampusLAN: Bool {
-        if case .campusLAN = self { return true }
-        return false
-    }
-
-    public var isCellular: Bool {
-        if case .cellularHotspot = self { return true }
-        return false
-    }
-
-    public var isConnected: Bool {
-        if case .disconnected = self { return false }
-        return true
-    }
-
-    public var primaryInterface: String? {
-        switch self {
-        case .campusLAN(let iface, _, _, _): return iface
-        case .cellularHotspot(let iface, _, _, _): return iface
-        case .externalWiFi(let iface, _, _, _): return iface
-        case .disconnected: return nil
-        }
-    }
-
-    public var mtu: Int {
-        switch self {
-        case .campusLAN(_, _, _, let m): return m
-        case .cellularHotspot(_, _, _, let m): return m
-        case .externalWiFi(_, _, _, let m): return m
-        case .disconnected: return 0
-        }
-    }
-}
+// NetworkEnvironmentState is canonically defined in NetBoostCore/VPNModels.swift
+public typealias NetworkEnvironmentState = NetBoostCore.NetworkEnvironmentState
 
 public final class MockNetworkEnvironment: @unchecked Sendable {
     private let lock = NSLock()

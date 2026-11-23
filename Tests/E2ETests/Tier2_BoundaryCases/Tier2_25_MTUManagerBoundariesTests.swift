@@ -59,7 +59,7 @@ struct Tier2_25_MTUManagerBoundariesTests {
     }
 
     @Test("T2-F25-05: MockProcessRunner intercepts networksetup -setMTU command")
-    func testMockProcessRunnerMTUInterception() {
+    func testMockProcessRunnerMTUInterception() async throws {
         mockRunner.registerStub(
             commandContaining: "networksetup -setMTU",
             stdout: "Set MTU for Wi-Fi to 1280\n"
@@ -67,5 +67,10 @@ struct Tier2_25_MTUManagerBoundariesTests {
 
         let cmd = "networksetup -setMTU Wi-Fi 1280"
         #expect(mockRunner.didExecute(commandContaining: cmd) == false)
+
+        let output = try await mockRunner.run("networksetup", arguments: ["-setMTU", "Wi-Fi", "1280"])
+        #expect(output.succeeded)
+        #expect(output.stdout.contains("Set MTU for Wi-Fi to 1280"))
+        #expect(mockRunner.didExecute(commandContaining: cmd) == true)
     }
 }

@@ -55,8 +55,13 @@ struct Tier2_32_SysctlForwardingBoundariesTests {
     }
 
     @Test("T2-F32-05: MockProcessRunner intercepts sysctl forwarding commands")
-    func testMockProcessRunnerSysctl() {
+    func testMockProcessRunnerSysctl() async throws {
         mockRunner.registerStub(commandContaining: "sysctl -w net.inet.ip.forwarding=1", stdout: "net.inet.ip.forwarding: 0 -> 1\n", exitCode: 0)
         #expect(mockRunner.didExecute(commandContaining: "sysctl -w net.inet.ip.forwarding=1") == false)
+
+        let output = try await mockRunner.run("sysctl", arguments: ["-w", "net.inet.ip.forwarding=1"])
+        #expect(output.succeeded)
+        #expect(output.stdout.contains("net.inet.ip.forwarding: 0 -> 1"))
+        #expect(mockRunner.didExecute(commandContaining: "sysctl -w net.inet.ip.forwarding=1") == true)
     }
 }

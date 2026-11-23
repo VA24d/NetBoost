@@ -52,12 +52,22 @@ struct Tier2_26_DNSFlushBoundariesTests {
     }
 
     @Test("T2-F26-04: MockProcessRunner intercepts DNS flush commands")
-    func testMockProcessRunnerDNSFlushInterception() {
-        mockRunner.registerStub(commandContaining: "dscacheutil -flushcache", stdout: "", exitCode: 0)
-        mockRunner.registerStub(commandContaining: "killall -HUP mDNSResponder", stdout: "", exitCode: 0)
+    func testMockProcessRunnerDNSFlushInterception() async throws {
+        mockRunner.registerStub(commandContaining: "dscacheutil -flushcache", stdout: "cache flushed\n", exitCode: 0)
+        mockRunner.registerStub(commandContaining: "killall -HUP mDNSResponder", stdout: "mDNSResponder signaled\n", exitCode: 0)
 
         #expect(mockRunner.didExecute(commandContaining: "dscacheutil") == false)
         #expect(mockRunner.didExecute(commandContaining: "killall") == false)
+
+        let out1 = try await mockRunner.run("dscacheutil", arguments: ["-flushcache"])
+        let out2 = try await mockRunner.run("killall", arguments: ["-HUP", "mDNSResponder"])
+
+        #expect(out1.succeeded)
+        #expect(out1.stdout.contains("cache flushed"))
+        #expect(out2.succeeded)
+        #expect(out2.stdout.contains("mDNSResponder signaled"))
+        #expect(mockRunner.didExecute(commandContaining: "dscacheutil") == true)
+        #expect(mockRunner.didExecute(commandContaining: "killall") == true)
     }
 
     @Test("T2-F26-05: Non-zero exit code on mDNSResponder restart produces diagnostic report")
