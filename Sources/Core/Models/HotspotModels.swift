@@ -30,6 +30,7 @@ public struct DHCPLease: Codable, Sendable, Identifiable, Equatable {
     public var id: String { ipAddress }
     public let ipAddress: String
     public let macAddress: String
+    public let hostname: String?
     public let leaseStart: Date
     public let leaseDuration: TimeInterval
 
@@ -44,11 +45,13 @@ public struct DHCPLease: Codable, Sendable, Identifiable, Equatable {
     public init(
         ipAddress: String,
         macAddress: String,
+        hostname: String? = nil,
         leaseStart: Date = Date(),
         leaseDuration: TimeInterval = 86400
     ) {
         self.ipAddress = ipAddress
         self.macAddress = macAddress
+        self.hostname = hostname
         self.leaseStart = leaseStart
         self.leaseDuration = leaseDuration
     }
