@@ -57,7 +57,18 @@ public struct DHCPLease: Codable, Sendable, Identifiable, Equatable {
     }
 }
 
+public enum HotspotSecurityType: String, Codable, Sendable, CaseIterable, Identifiable {
+    case wpa3Personal = "WPA3 Personal (SAE)"
+    case wpa2Wpa3Transition = "WPA2/WPA3 Transition"
+    case wpa2Personal = "WPA2 Personal"
+
+    public var id: String { rawValue }
+}
+
 public struct HotspotConfiguration: Codable, Sendable, Equatable {
+    public var ssid: String
+    public var password: String
+    public var securityType: HotspotSecurityType
     public var subnet: String
     public var gateway: String
     public var dhcpRangeStart: String
@@ -67,6 +78,9 @@ public struct HotspotConfiguration: Codable, Sendable, Equatable {
     public var isActive: Bool
 
     public init(
+        ssid: String = "NetBoost-Hotspot",
+        password: String = "CampusNet2026!",
+        securityType: HotspotSecurityType = .wpa2Wpa3Transition,
         subnet: String = "192.168.2.0/24",
         gateway: String = "192.168.2.1",
         dhcpRangeStart: String = "192.168.2.10",
@@ -75,6 +89,9 @@ public struct HotspotConfiguration: Codable, Sendable, Equatable {
         upstreamInterface: String = "en10",
         isActive: Bool = false
     ) {
+        self.ssid = ssid
+        self.password = password
+        self.securityType = securityType
         self.subnet = subnet
         self.gateway = gateway
         self.dhcpRangeStart = dhcpRangeStart

@@ -125,4 +125,46 @@ public final class DarwinSocketHelper: Sendable {
         let msg = String(cString: strerror(code))
         throw DarwinSocketError.socketOptionFailed(errno: code, message: msg)
     }
+
+    public struct InterfaceByteCounters: Sendable, Equatable {
+        public let inputBytes: UInt64
+        public let outputBytes: UInt64
+
+        public init(inputBytes: UInt64 = 0, outputBytes: UInt64 = 0) {
+            self.inputBytes = inputBytes
+            self.outputBytes = outputBytes
+        }
+    }
+
+    /// Reads real-time hardware interface bytes (in and out) using Darwin getifaddrs
+    public static func getInterfaceBytes(for bsdName: String? = nil) -> InterfaceByteCounters {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else {
+            return InterfaceByteCounters(inputBytes: 0, outputBytes: 0)
+        }
+        defer { freeifaddrs(ifaddr) }
+
+        var totalIn: UInt64 = 0
+        var totalOut: UInt64 = 0
+
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let ptr = cursor {
+            let flags = Int32(ptr.pointee.ifa_flags)
+            let isLoopback = (flags & IFF_LOOPBACK) != 0
+            if !isLoopback {
+                let name = String(cString: ptr.pointee.ifa_name)
+                if bsdName == nil || name == bsdName {
+                    if ptr.pointee.ifa_addr?.pointee.sa_family == UInt8(AF_LINK) {
+                        if let data = ptr.pointee.ifa_data {
+                            let ifData = data.assumingMemoryBound(to: if_data.self).pointee
+                            totalIn += UInt64(ifData.ifi_ibytes)
+                            totalOut += UInt64(ifData.ifi_obytes)
+                        }
+                    }
+                }
+            }
+            cursor = ptr.pointee.ifa_next
+        }
+        return InterfaceByteCounters(inputBytes: totalIn, outputBytes: totalOut)
+    }
 }

@@ -32,12 +32,36 @@ public final class RepairRoutines: @unchecked Sendable {
             _ = try? await ShellCommand.run(cmd1[0], arguments: Array(cmd1.dropFirst()))
             do {
                 _ = try await PrivilegeHelper.runElevated(script: "\(cmd1.joined(separator: " ")) && \(cmd2.joined(separator: " "))")
+            } catch PrivilegeError.elevationDenied {
+                throw PrivilegeError.elevationDenied
             } catch {
                 // If helper is present, try helper
                 _ = try? await PrivilegeHelper.runHelper(action: "flush-dns")
             }
         }
         recordEvent("DNS cache flushed (dscacheutil + killall mDNSResponder)")
+    }
+
+    /// Executes MTU adjustment, DNS flush, and ARP table flush in a single elevation pass so the user is prompted at most ONCE.
+    public func executeBatchAutoFix(service: String = "Wi-Fi", mtu: Int = 1280) async throws {
+        let (dns1, dns2) = DNSFlushRoutine.makeCommands()
+        let arpCmd = ARPFlushRoutine.makeFlushAllCommand()
+        let mtuCmd = ["/usr/sbin/networksetup", "-setMTU", service, String(mtu)]
+
+        let combined = "\(mtuCmd.joined(separator: " ")) && \(dns1.joined(separator: " ")) && \(dns2.joined(separator: " ")) && \(arpCmd.joined(separator: " "))"
+
+        if PrivilegeHelper.isRoot {
+            _ = try await ShellCommand.runBash(combined)
+        } else {
+            do {
+                _ = try await PrivilegeHelper.runElevated(script: combined)
+            } catch PrivilegeError.elevationDenied {
+                throw PrivilegeError.elevationDenied
+            } catch {
+                _ = try? await PrivilegeHelper.runHelper(action: "batch-autofix", arguments: [service, String(mtu)])
+            }
+        }
+        recordEvent("Batch Auto-Fix executed: MTU set to \(mtu), DNS flushed, ARP cleared (single elevation)")
     }
 
     // MARK: - ARP Cache Flush
