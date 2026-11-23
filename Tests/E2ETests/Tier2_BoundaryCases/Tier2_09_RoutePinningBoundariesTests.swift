@@ -28,7 +28,7 @@ struct Tier2_09_RoutePinningBoundariesTests {
     }
 
     @Test("T2-F09-02: Route pinning execution generates exact route add command via process runner")
-    func testRouteAddCommandGeneration() {
+    func testRouteAddCommandGeneration() async throws {
         let subnet = "10.8.0.0/16"
         let gateway = "10.1.36.1"
         let command = "route add -net \(subnet) \(gateway)"
@@ -37,6 +37,11 @@ struct Tier2_09_RoutePinningBoundariesTests {
 
         mockRunner.registerStub(commandContaining: "route add", stdout: "add net 10.8.0.0: gateway 10.1.36.1\n")
         #expect(mockRunner.didExecute(commandContaining: "route add") == false)
+
+        let output = try await mockRunner.run("route", arguments: ["add", "-net", subnet, gateway])
+        #expect(output.succeeded)
+        #expect(output.stdout.contains("gateway 10.1.36.1"))
+        #expect(mockRunner.didExecute(commandContaining: "route add") == true)
     }
 
     @Test("T2-F09-03: Route unpinning generates exact route delete command")
