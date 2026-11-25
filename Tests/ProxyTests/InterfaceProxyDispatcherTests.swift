@@ -6,7 +6,7 @@ import Darwin
 @Suite("Interface Proxy Dispatcher Unit & Integration Tests")
 struct InterfaceProxyDispatcherTests {
 
-    private func configureClientSocket(_ fd: Int32, timeoutSeconds: Int = 5) {
+    private func configureClientSocket(_ fd: Int32, timeoutSeconds: Int = 15) {
         var one: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
         var tv = timeval(tv_sec: timeoutSeconds, tv_usec: 0)

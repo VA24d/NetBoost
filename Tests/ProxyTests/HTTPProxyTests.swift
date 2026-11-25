@@ -6,12 +6,35 @@ import Darwin
 @Suite("HTTP Proxy Unit & Integration Tests")
 struct HTTPProxyTests {
 
-    private func configureClientSocket(_ fd: Int32, timeoutSeconds: Int = 5) {
+    private func configureClientSocket(_ fd: Int32, timeoutSeconds: Int = 15) {
         var one: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
         var tv = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    }
+
+    private func writeAll(_ fd: Int32, data: Data) {
+        var offset = 0
+        while offset < data.count {
+            let n = data.withUnsafeBytes { ptr -> Int in
+                guard let base = ptr.baseAddress else { return -1 }
+                return Darwin.write(fd, base.advanced(by: offset), data.count - offset)
+            }
+            if n < 0 && errno == EINTR { continue }
+            guard n > 0 else { break }
+            offset += n
+        }
+    }
+
+    private func readSome(_ fd: Int32, maxBytes: Int) -> Data {
+        var buf = [UInt8](repeating: 0, count: maxBytes)
+        while true {
+            let n = Darwin.read(fd, &buf, buf.count)
+            if n < 0 && errno == EINTR { continue }
+            guard n > 0 else { return Data() }
+            return Data(buf.prefix(n))
+        }
     }
 
     @Test("HTTP Proxy request line parser: CONNECT method")
@@ -114,10 +137,9 @@ struct HTTPProxyTests {
         _ = reqData.withUnsafeBytes { Darwin.write(clientFd, $0.baseAddress!, reqData.count) }
 
         // 5. Read 200 Connection Established
-        var respBuf = [UInt8](repeating: 0, count: 128)
-        let readRespCount = Darwin.read(clientFd, &respBuf, respBuf.count)
-        #expect(readRespCount > 0)
-        let respString = String(decoding: respBuf.prefix(readRespCount), as: UTF8.self)
+        let respData = readSome(clientFd, maxBytes: 128)
+        #expect(!respData.isEmpty)
+        let respString = String(decoding: respData, as: UTF8.self)
         #expect(respString.hasPrefix("HTTP/1.1 200 Connection Established"))
         #expect(respString.contains("Proxy-Agent: NetBoost/1.0"))
 
@@ -163,13 +185,11 @@ struct HTTPProxyTests {
         }
 
         let getReq = "GET http://127.0.0.1:\(targetPort)/campus-status HTTP/1.1\r\nHost: 127.0.0.1\r\nProxy-Connection: keep-alive\r\n\r\n"
-        let getReqData = Data(getReq.utf8)
-        _ = getReqData.withUnsafeBytes { Darwin.write(clientFd, $0.baseAddress!, getReqData.count) }
+        writeAll(clientFd, data: Data(getReq.utf8))
 
-        var respBuf = [UInt8](repeating: 0, count: 512)
-        let readCount = Darwin.read(clientFd, &respBuf, respBuf.count)
-        #expect(readCount > 0)
-        let respString = String(decoding: respBuf.prefix(readCount), as: UTF8.self)
+        let respData = readSome(clientFd, maxBytes: 512)
+        #expect(!respData.isEmpty)
+        let respString = String(decoding: respData, as: UTF8.self)
         #expect(respString.contains("HTTP/1.1 200 OK"))
         #expect(respString.contains("Echo: Received"))
 
@@ -204,12 +224,18 @@ struct HTTPProxyTests {
         let headerData = Data(hugeHeader.utf8)
         #expect(headerData.count > 65536)
 
-        _ = headerData.withUnsafeBytes { Darwin.write(clientFd, $0.baseAddress!, headerData.count) }
+        writeAll(clientFd, data: headerData)
 
+        var respData = Data()
         var respBuf = [UInt8](repeating: 0, count: 256)
-        let readCount = Darwin.read(clientFd, &respBuf, respBuf.count)
-        #expect(readCount > 0)
-        let respString = String(decoding: respBuf.prefix(readCount), as: UTF8.self)
+        while respData.count < 256 {
+            let n = Darwin.read(clientFd, &respBuf, respBuf.count)
+            if n < 0 && errno == EINTR { continue }
+            guard n > 0 else { break }
+            respData.append(respBuf, count: n)
+        }
+        #expect(!respData.isEmpty)
+        let respString = String(decoding: respData, as: UTF8.self)
         #expect(respString.contains("431 Request Header Fields Too Large"))
     }
 
@@ -303,9 +329,12 @@ struct HTTPProxyTests {
         }
         let targetPort = Int(UInt16(bigEndian: boundAddr.sin6_port))
 
-        let acceptTask = Task.detached {
+        let acceptDone = DispatchGroup()
+        acceptDone.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { acceptDone.leave() }
             var pfd = pollfd(fd: targetFd, events: Int16(POLLIN), revents: 0)
-            let pollRes = Darwin.poll(&pfd, 1, 3000)
+            let pollRes = Darwin.poll(&pfd, 1, 10_000)
             guard pollRes > 0 else { return }
 
             var client = sockaddr_in6()
@@ -320,10 +349,9 @@ struct HTTPProxyTests {
                 var buf = [UInt8](repeating: 0, count: 64)
                 let n = Darwin.read(conn, &buf, buf.count)
                 if n > 0 {
-                    _ = buf.prefix(n).withUnsafeBytes { ptr in
-                        Darwin.write(conn, ptr.baseAddress!, n)
-                    }
+                    writeAll(conn, data: Data(buf.prefix(n)))
                 }
+                _ = Darwin.shutdown(conn, SHUT_WR)
                 Darwin.close(conn)
             }
         }
@@ -349,23 +377,27 @@ struct HTTPProxyTests {
         }
         #expect(connRes == 0)
 
-        let reqData = Data("CONNECT [::1]:\(targetPort) HTTP/1.1\r\nHost: [::1]:\(targetPort)\r\n\r\n".utf8)
-        _ = reqData.withUnsafeBytes { Darwin.write(clientFd, $0.baseAddress!, reqData.count) }
+        writeAll(clientFd, data: Data("CONNECT [::1]:\(targetPort) HTTP/1.1\r\nHost: [::1]:\(targetPort)\r\n\r\n".utf8))
 
-        var respBuf = [UInt8](repeating: 0, count: 128)
-        let n = Darwin.read(clientFd, &respBuf, respBuf.count)
-        #expect(n > 0)
-        let respStr = String(decoding: respBuf.prefix(n), as: UTF8.self)
+        let respData = readSome(clientFd, maxBytes: 128)
+        guard !respData.isEmpty else {
+            Issue.record("Expected 200 Connection Established response from IPv6 CONNECT")
+            return
+        }
+        let respStr = String(decoding: respData, as: UTF8.self)
         #expect(respStr.hasPrefix("HTTP/1.1 200 Connection Established"))
 
         let ping = Data("v6ok".utf8)
-        _ = ping.withUnsafeBytes { Darwin.write(clientFd, $0.baseAddress!, ping.count) }
-        var echoBuf = [UInt8](repeating: 0, count: 4)
-        let echoN = Darwin.read(clientFd, &echoBuf, 4)
-        #expect(echoN == 4)
-        #expect(String(decoding: echoBuf, as: UTF8.self) == "v6ok")
+        writeAll(clientFd, data: ping)
+        let echoData = readSome(clientFd, maxBytes: 4)
+        #expect(echoData.count == 4)
+        #expect(String(decoding: echoData, as: UTF8.self) == "v6ok")
 
         _ = Darwin.shutdown(clientFd, SHUT_RDWR)
-        await acceptTask.value
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            acceptDone.notify(queue: DispatchQueue.global(qos: .userInitiated)) {
+                continuation.resume()
+            }
+        }
     }
 }

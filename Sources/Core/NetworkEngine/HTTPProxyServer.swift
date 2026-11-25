@@ -306,16 +306,14 @@ public final class HTTPProxyServer: @unchecked Sendable {
                 }
 
                 if rawBuffer.count >= Self.maxHeaderSize && delimiterRange == nil {
-                    let resp = Self.makePayloadTooLargeResponse()
-                    _ = ProxySocketIO.writeAll(fd: clientFd, data: Data(resp.utf8))
+                    Self.finishClientRejection(fd: clientFd, response: Self.makePayloadTooLargeResponse())
                     continuation.resume(returning: .finished)
                     return
                 }
 
                 guard let dRange = delimiterRange else {
                     if !rawBuffer.isEmpty {
-                        let resp = Self.makeBadRequestResponse()
-                        _ = ProxySocketIO.writeAll(fd: clientFd, data: Data(resp.utf8))
+                        Self.finishClientRejection(fd: clientFd, response: Self.makeBadRequestResponse())
                     }
                     continuation.resume(returning: .finished)
                     return
@@ -326,16 +324,14 @@ public final class HTTPProxyServer: @unchecked Sendable {
                 let extraBodyData = rawBuffer.subdata(in: dRange.upperBound..<rawBuffer.count)
 
                 guard let rawHeaderString = String(data: headerOnlyBytes, encoding: .utf8) else {
-                    let resp = Self.makeBadRequestResponse()
-                    _ = ProxySocketIO.writeAll(fd: clientFd, data: Data(resp.utf8))
+                    Self.finishClientRejection(fd: clientFd, response: Self.makeBadRequestResponse())
                     continuation.resume(returning: .finished)
                     return
                 }
 
                 let parsed = Self.parseRequest(rawHeaderString)
                 if case .invalid = parsed {
-                    let resp = Self.makeBadRequestResponse()
-                    _ = ProxySocketIO.writeAll(fd: clientFd, data: Data(resp.utf8))
+                    Self.finishClientRejection(fd: clientFd, response: Self.makeBadRequestResponse())
                     continuation.resume(returning: .finished)
                     return
                 }
@@ -377,6 +373,24 @@ public final class HTTPProxyServer: @unchecked Sendable {
                 onTargetConnected: onTargetConnected,
                 onBytesTransferred: onBytesTransferred
             )
+        }
+    }
+
+    private static func finishClientRejection(fd: Int32, response: String) {
+        _ = ProxySocketIO.writeAll(fd: fd, data: Data(response.utf8))
+        _ = Darwin.shutdown(fd, SHUT_WR)
+
+        // Drain unread client bytes briefly so close() does not send TCP RST over our HTTP response.
+        var drainBuf = [UInt8](repeating: 0, count: 4096)
+        var totalDrained = 0
+        while totalDrained < 65_536 {
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let pollRes = Darwin.poll(&pfd, 1, 25)
+            guard pollRes > 0, (pfd.revents & Int16(POLLIN)) != 0 else { break }
+            let n = Darwin.read(fd, &drainBuf, drainBuf.count)
+            if n < 0 && errno == EINTR { continue }
+            guard n > 0 else { break }
+            totalDrained += n
         }
     }
 
