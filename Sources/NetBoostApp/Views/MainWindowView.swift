@@ -194,49 +194,63 @@ public struct MainWindowView: View {
 }
 
 private struct NetBoostBrandMark: View {
+    private static let bundleIcon: NSImage? = {
+        if let icnsURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let img = NSImage(contentsOf: icnsURL) {
+            return img
+        }
+        return nil
+    }()
+
     var body: some View {
-        Canvas { context, size in
-            let w = size.width
-            let h = size.height
-            let rect = CGRect(x: 0.5, y: 0.5, width: w - 1, height: h - 1)
-            let squircle = Path(roundedRect: rect, cornerRadius: w * 0.25, style: .continuous)
+        if let icon = Self.bundleIcon {
+            Image(nsImage: icon)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+        } else {
+            Canvas { context, size in
+                let w = size.width
+                let h = size.height
+                let rect = CGRect(x: 0.5, y: 0.5, width: w - 1, height: h - 1)
+                let squircle = Path(roundedRect: rect, cornerRadius: w * 0.24, style: .continuous)
 
-            context.fill(
-                squircle,
-                with: .linearGradient(
-                    Gradient(colors: [Color(hex: "#0D2448"), Color(hex: "#071122")]),
-                    startPoint: .zero,
-                    endPoint: CGPoint(x: w, y: h)
+                context.fill(squircle, with: .color(Color(hex: "#15181F")))
+                context.stroke(squircle, with: .color(Color.white.opacity(0.12)), lineWidth: 0.75)
+
+                let orbRect = CGRect(x: w * 0.20, y: h * 0.20, width: w * 0.60, height: h * 0.60)
+                context.fill(
+                    Path(ellipseIn: orbRect),
+                    with: .linearGradient(
+                        Gradient(colors: [Color(hex: "#2DD4BF"), Color(hex: "#1D4ED8")]),
+                        startPoint: CGPoint(x: w * 0.5, y: h * 0.2),
+                        endPoint: CGPoint(x: w * 0.5, y: h * 0.8)
+                    )
                 )
-            )
-            context.stroke(squircle, with: .color(Color.white.opacity(0.18)), lineWidth: 0.8)
 
-            // Twin directional bridge strokes + central velocity chevron.
-            var arcLeft = Path()
-            arcLeft.move(to: CGPoint(x: w * 0.24, y: h * 0.72))
-            arcLeft.addCurve(
-                to: CGPoint(x: w * 0.54, y: h * 0.28),
-                control1: CGPoint(x: w * 0.24, y: h * 0.42),
-                control2: CGPoint(x: w * 0.40, y: h * 0.30)
-            )
-            context.stroke(
-                arcLeft,
-                with: .color(GlassTheme.cyanSapphire),
-                style: StrokeStyle(lineWidth: w * 0.10, lineCap: .round)
-            )
-
-            var chevron = Path()
-            chevron.move(to: CGPoint(x: w * 0.44, y: h * 0.70))
-            chevron.addLine(to: CGPoint(x: w * 0.76, y: h * 0.46))
-            chevron.addLine(to: CGPoint(x: w * 0.52, y: h * 0.30))
-            context.stroke(
-                chevron,
-                with: .color(Color(hex: "#7DD3FC")),
-                style: StrokeStyle(lineWidth: w * 0.095, lineCap: .round, lineJoin: .round)
-            )
-
-            let node = CGRect(x: w * 0.20, y: h * 0.66, width: w * 0.16, height: w * 0.16)
-            context.fill(Path(ellipseIn: node), with: .color(GlassTheme.emeraldGreen))
+                var wave = Path()
+                wave.move(to: CGPoint(x: w * 0.22, y: h * 0.68))
+                wave.addCurve(
+                    to: CGPoint(x: w * 0.44, y: h * 0.34),
+                    control1: CGPoint(x: w * 0.32, y: h * 0.68),
+                    control2: CGPoint(x: w * 0.36, y: h * 0.34)
+                )
+                wave.addCurve(
+                    to: CGPoint(x: w * 0.62, y: h * 0.66),
+                    control1: CGPoint(x: w * 0.50, y: h * 0.34),
+                    control2: CGPoint(x: w * 0.54, y: h * 0.66)
+                )
+                wave.addCurve(
+                    to: CGPoint(x: w * 0.78, y: h * 0.38),
+                    control1: CGPoint(x: w * 0.68, y: h * 0.66),
+                    control2: CGPoint(x: w * 0.72, y: h * 0.38)
+                )
+                context.stroke(
+                    wave,
+                    with: .color(.white),
+                    style: StrokeStyle(lineWidth: w * 0.085, lineCap: .round, lineJoin: .round)
+                )
+            }
         }
     }
 }

@@ -23,6 +23,25 @@ public struct NetBoostApp: App {
             MainWindowView()
                 .environmentObject(appState)
                 .frame(minWidth: GlassTheme.minWindowWidth, minHeight: GlassTheme.minWindowHeight)
+                .onAppear {
+                    if let idx = ProcessInfo.processInfo.arguments.firstIndex(of: "--tab"),
+                       ProcessInfo.processInfo.arguments.indices.contains(idx + 1) {
+                        let raw = ProcessInfo.processInfo.arguments[idx + 1].lowercased()
+                        let matched: AppNavigationTab? = switch raw {
+                        case "dashboard": .dashboard
+                        case "hotspot": .hotspot
+                        case "dispatcher": .dispatcher
+                        case "vpn": .vpn
+                        case "accelerator": .accelerator
+                        case "doctor": .doctor
+                        case "aidoctor", "ai": .aiDoctor
+                        default: nil
+                        }
+                        if let matched {
+                            appState.selectedTab = matched
+                        }
+                    }
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(

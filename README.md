@@ -1,9 +1,37 @@
 # NetBoost
 
+<img src="Assets/AppIcon.png" alt="NetBoost icon" width="96" />
+
 NetBoost is a macOS network utility built with Swift 6 and SwiftUI. It shares 802.1X Ethernet over Wi-Fi and switches split-tunnel OpenVPN automatically. Built-in tools add per-interface proxies, chunked HTTP downloads, and local LAN repairs.
 
 [![CI](https://github.com/VA24d/NetBoost/actions/workflows/ci.yml/badge.svg)](https://github.com/VA24d/NetBoost/actions/workflows/ci.yml)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC_BY--NC--SA_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+
+## Screenshots
+
+### Dashboard
+
+The Dashboard shows active interfaces and live upload and download rates. Quick toggles control hotspot, proxy, and VPN automation.
+
+![NetBoost Dashboard](Assets/screenshots/dashboard.png)
+
+### Hotspot sharing
+
+Hotspot mode turns on kernel IP forwarding, loads the `netboost` PF anchor, writes WPA2 or WPA3 NAT settings, and lists client leases.
+
+![NetBoost Hotspot sharing](Assets/screenshots/hotspot.png)
+
+### Proxy dispatcher
+
+The Proxy tab runs local SOCKS5 and HTTP CONNECT listeners on ports `1080` to `1082`, copies shell exports, and pins static subnets.
+
+![NetBoost Proxy dispatcher](Assets/screenshots/dispatcher.png)
+
+### Campus doctor
+
+Campus Doctor probes gateway and external RTT, checks for captive portals, sets MTU `1280`, and resets DNS, ARP, and proxy state per service.
+
+![NetBoost Campus doctor](Assets/screenshots/doctor.png)
 
 ## Features
 
@@ -39,13 +67,14 @@ That LaunchDaemon listens on `/var/run/netboost/helper.sock`, checks the caller 
 
 ```text
 NetBoost/
+├── Assets/                       # AppIcon.png and Assets/screenshots/*.png
 ├── Package.swift                 # Swift 6.0 manifest (NetBoostCore, NetBoostApp, NetBoostHelper, NetBoostTests)
 ├── Makefile                      # Wraps build.sh, run_tests.sh, and swift package clean
 ├── vfs.yaml                      # Command Line Tools VFS overlay checked by build tooling tests
 ├── Scripts/
 │   ├── build.sh                  # Builds targets via Xcode or CLT VFS fallback
 │   ├── run_tests.sh              # Runs Swift Testing suites with CLT Testing.framework fallback
-│   ├── package_dmg.sh            # Creates NetBoost.app, generates AppIcon.icns, signs, and builds .dmg
+│   ├── package_dmg.sh            # Creates NetBoost.app, builds AppIcon.icns, signs, and packages .dmg
 │   ├── netboost-helper.sh        # Legacy shell helper fallback bundled in app resources
 │   └── *.modulemap / *.swiftoverlay
 ├── Sources/
@@ -55,11 +84,11 @@ NetBoost/
 │   │   ├── Downloader/           # RangeProbe, ChunkPartitionEngine, ChunkWorker, DiskAssembler, ClipboardWatcher, ChecksumValidator
 │   │   ├── Hotspot/              # HotspotNATController, DHCPServer, DNSProxy, ARPScanner
 │   │   ├── Models/               # Shared Codable/Sendable models for each subsystem
-│   │   ├── NetworkEngine/        # InterfaceProxyDispatcher, SOCKS5Server, HTTPProxyServer, RoutePinningEngine, ShellEnvGenerator
+│   │   ├── NetworkEngine/        # InterfaceProxyDispatcher, SOCKS5Server, HTTPProxyServer, ProxySocketIO, RoutePinningEngine, ShellEnvGenerator
 │   │   ├── System/               # PrivilegeHelper, HelperProtocol, DarwinSocketHelper, ShellCommand
 │   │   └── VPN/                  # NetworkSensor, VPNRuleEngine, PassepartoutController, OpenVPNParser, RouteConflictDetector
 │   ├── NetBoostApp/              # NetBoostApp SwiftUI desktop client and menu bar extra
-│   │   ├── App/                  # NetBoostApp entry point, shortcuts, modular AppState files
+│   │   ├── App/                  # NetBoostApp, AppState, AppStateTypes, and AppState+*.swift extensions
 │   │   ├── Theme/                # GlassTheme color palette, window sizing, visual effects
 │   │   └── Views/                # HeaderBarView, MainWindowView, MenuBarPopupView, and 7 feature tabs
 │   └── NetBoostHelper/           # Root LaunchDaemon binary (Sources/NetBoostHelper/main.swift)
@@ -81,6 +110,10 @@ cd NetBoost
 ```
 
 Both `build.sh` and `run_tests.sh` detect whether Xcode or standalone Command Line Tools are active. Under Command Line Tools, they write `.build/vfs.generated.yaml` automatically before invoking `swift`.
+
+## Future plans
+
+Next updates will redraw `Assets/AppIcon.png` to merge the Ethernet and Wi-Fi shapes into one connected vector mark. Release builds will add Developer ID signing, notarization, and `SMAppService` support for Gatekeeper. Campus Doctor will gain broader live telemetry and extra diagnostic checks.
 
 ## License
 

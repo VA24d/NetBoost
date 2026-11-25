@@ -181,7 +181,7 @@ public struct DashboardView: View {
             SectionLabel("Quick controls")
 
             LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 220, maximum: 380), spacing: 12)],
+                columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
                 spacing: 12
             ) {
                 quickControlTile(
@@ -339,17 +339,29 @@ public struct DashboardView: View {
         }
     }
 
+    private var effectivePrimaryBSDName: String? {
+        if appState.hardwareInterfaces.contains(where: { $0.bsdName == appState.primaryInterface && $0.isUp }) {
+            return appState.primaryInterface
+        }
+        return appState.hardwareInterfaces.first(where: { $0.isPrimary && $0.isUp })?.bsdName
+            ?? appState.hardwareInterfaces.first(where: { $0.isPrimary })?.bsdName
+    }
+
     private var sortedInterfaces: [NetworkInterfaceInfo] {
-        appState.hardwareInterfaces.sorted { lhs, rhs in
-            if lhs.isPrimary != rhs.isPrimary { return lhs.isPrimary }
+        let primaryBSD = effectivePrimaryBSDName
+        return appState.hardwareInterfaces.sorted { lhs, rhs in
+            let lhsPrimary = (lhs.bsdName == primaryBSD)
+            let rhsPrimary = (rhs.bsdName == primaryBSD)
+            if lhsPrimary != rhsPrimary { return lhsPrimary }
             if lhs.isUp != rhs.isUp { return lhs.isUp }
             return lhs.bsdName.localizedStandardCompare(rhs.bsdName) == .orderedAscending
         }
     }
 
     private func hardwareInterfaceCard(_ iface: NetworkInterfaceInfo) -> some View {
+        let isPrimary = (iface.bsdName == effectivePrimaryBSDName)
         let accent: Color = iface.isUp
-            ? (iface.isPrimary ? GlassTheme.sapphireBlue : GlassTheme.emeraldGreen)
+            ? (isPrimary ? GlassTheme.sapphireBlue : GlassTheme.emeraldGreen)
             : GlassTheme.textTertiary
 
         return VStack(alignment: .leading, spacing: 12) {
@@ -380,7 +392,7 @@ public struct DashboardView: View {
 
                 Spacer(minLength: 8)
 
-                if iface.isPrimary {
+                if isPrimary {
                     Text("Primary")
                         .font(.system(size: 10.5, weight: .medium))
                         .lineLimit(1)

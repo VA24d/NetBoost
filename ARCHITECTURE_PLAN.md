@@ -25,12 +25,14 @@ Sources/
 │   ├── Models/         AcceleratorModels.swift, DiagnosticModels.swift, HotspotModels.swift,
 │   │                   InterfaceModels.swift, ProxyModels.swift, VPNModels.swift
 │   ├── NetworkEngine/  InterfaceProxyDispatcher.swift, SOCKS5Server.swift, HTTPProxyServer.swift,
-│   │                   RoutePinningEngine.swift, ShellEnvGenerator.swift
+│   │                   ProxySocketIO.swift, RoutePinningEngine.swift, ShellEnvGenerator.swift
 │   ├── System/         PrivilegeHelper.swift, HelperProtocol.swift, DarwinSocketHelper.swift, ShellCommand.swift
 │   └── VPN/            NetworkSensor.swift, VPNRuleEngine.swift, PassepartoutController.swift,
 │                       OpenVPNParser.swift, RouteConflictDetector.swift
 ├── NetBoostApp/
-│   ├── App/            NetBoostApp.swift and modular AppState extension files
+│   ├── App/            NetBoostApp.swift, AppState.swift, AppStateTypes.swift,
+│   │                   AppState+Hotspot.swift, AppState+ProxyAndVPN.swift,
+│   │                   AppState+DownloaderAndAI.swift, AppState+Diagnostics.swift
 │   ├── Theme/          GlassTheme.swift
 │   └── Views/          MainWindowView.swift, HeaderBarView.swift, MenuBarPopupView.swift,
 │                       WindowConfigurator.swift, DashboardView.swift, HotspotView.swift,
@@ -38,6 +40,8 @@ Sources/
 │                       DoctorView.swift, AIDoctorView.swift
 └── NetBoostHelper/
     └── main.swift
+
+Assets/                 AppIcon.png, screenshots/
 
 Scripts/                build.sh, run_tests.sh, package_dmg.sh, netboost-helper.sh,
                         empty.modulemap, empty.swiftoverlay, testing_foundation.modulemap

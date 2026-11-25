@@ -7,11 +7,11 @@ struct RouteConflictDetectorTests {
 
     @Test("IPv4 and UInt32 bitwise conversion and round-trip fidelity")
     func testIPv4MathConversions() {
-        let testCases = [
-            ("0.0.0.0", UInt32(0)),
-            ("10.1.36.1", UInt32((10 << 24) | (1 << 16) | (36 << 8) | 1)),
-            ("172.20.10.2", UInt32((172 << 24) | (20 << 16) | (10 << 8) | 2)),
-            ("255.255.255.255", UInt32(0xFFFFFFFF))
+        let testCases: [(String, UInt32)] = [
+            ("0.0.0.0", 0),
+            ("10.1.36.1", (UInt32(10) << 24) | (UInt32(1) << 16) | (UInt32(36) << 8) | 1),
+            ("172.20.10.2", (UInt32(172) << 24) | (UInt32(20) << 16) | (UInt32(10) << 8) | 2),
+            ("255.255.255.255", 0xFFFF_FFFF)
         ]
 
         for (ipStr, expectedUInt) in testCases {
