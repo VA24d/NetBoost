@@ -16,7 +16,15 @@ public final class ServiceOrderManager: Sendable {
         }
     }
 
-    public init() {}
+    private let executor: any PrivilegeCommandExecuting
+
+    public init() {
+        self.executor = SystemPrivilegeCommandExecutor()
+    }
+
+    internal init(executor: any PrivilegeCommandExecuting) {
+        self.executor = executor
+    }
 
     /// Parses output from `networksetup -listnetworkserviceorder`.
     public static func parseServiceOrder(output: String) -> [ServiceEntry] {
@@ -56,24 +64,41 @@ public final class ServiceOrderManager: Sendable {
         ["/usr/sbin/networksetup", "-ordernetworkservices"] + orderedServices
     }
 
+    /// Generates safely shell-quoted command string for `networksetup -ordernetworkservices`.
+    public static func makeOrderNetworkServicesShellScript(orderedServices: [String]) -> String {
+        makeOrderNetworkServicesCommand(orderedServices: orderedServices)
+            .map(ShellCommand.shellQuote)
+            .joined(separator: " ")
+    }
+
     /// Queries the system and returns currently active network services ordered by priority.
     public func getServiceOrder() async throws -> [ServiceEntry] {
-        let output = try await ShellCommand.run("/usr/sbin/networksetup", arguments: ["-listnetworkserviceorder"])
+        let output = try await executor.runCommand("/usr/sbin/networksetup", arguments: ["-listnetworkserviceorder"])
         guard output.succeeded else { return [] }
         return Self.parseServiceOrder(output: output.stdout)
     }
 
     /// Applies a new service priority order.
     public func reorderServices(orderedServices: [String]) async throws {
+        guard !orderedServices.isEmpty else {
+            throw PrivilegeError.executionFailed("No network services specified for reordering")
+        }
+
         let cmd = Self.makeOrderNetworkServicesCommand(orderedServices: orderedServices)
-        if PrivilegeHelper.isRoot {
-            _ = try await ShellCommand.run(cmd[0], arguments: Array(cmd.dropFirst()))
-        } else {
-            do {
-                _ = try await PrivilegeHelper.runElevated(script: cmd[0], arguments: Array(cmd.dropFirst()))
-            } catch {
-                _ = try? await PrivilegeHelper.runHelper(action: "order-services", arguments: orderedServices)
+        if executor.isRoot {
+            let output = try await executor.runCommand(cmd[0], arguments: Array(cmd.dropFirst()))
+            guard output.succeeded else {
+                throw ShellError.executionFailed(exitCode: output.exitCode, stdout: output.stdout, stderr: output.stderr)
             }
+        } else {
+            let quotedScript = Self.makeOrderNetworkServicesShellScript(orderedServices: orderedServices)
+            try await executor.executeElevatedWithFallback(
+                daemonAction: .orderServices,
+                daemonArguments: orderedServices,
+                fallbackScript: quotedScript,
+                helperAction: "order-services",
+                helperArguments: orderedServices
+            )
         }
     }
 

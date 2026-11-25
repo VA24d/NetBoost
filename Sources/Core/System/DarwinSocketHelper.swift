@@ -168,6 +168,9 @@ public final class DarwinSocketHelper: Sendable {
         return InterfaceByteCounters(inputBytes: totalIn, outputBytes: totalOut)
     }
 
+    /// `SIOCGIFMTU` ioctl request code on 64-bit Darwin (`_IOWR('i', 51, struct ifreq)`).
+    private static let siocgifmtuRequest: UInt = 0xc0206933
+
     /// Checks if a BSD network interface exists and has active flags (IFF_UP and IFF_RUNNING).
     public static func isInterfaceActive(_ bsdName: String) -> Bool {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
@@ -188,5 +191,103 @@ public final class DarwinSocketHelper: Sendable {
             cursor = ptr.pointee.ifa_next
         }
         return false
+    }
+
+    /// Queries the interface MTU via `SIOCGIFMTU` ioctl on an `AF_INET` datagram socket.
+    public static func getInterfaceMTU(_ bsdName: String) -> Int? {
+        guard !bsdName.isEmpty, bsdName.utf8.count < Int(IFNAMSIZ) else {
+            return nil
+        }
+
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { closeSocket(fd: fd) }
+
+        var ifr = ifreq()
+        _ = withUnsafeMutableBytes(of: &ifr.ifr_name) { buf in
+            guard let base = buf.baseAddress else { return 0 }
+            return Int(strlcpy(base.assumingMemoryBound(to: CChar.self), bsdName, buf.count))
+        }
+
+        guard ioctl(fd, siocgifmtuRequest, &ifr) == 0 else {
+            return nil
+        }
+        return Int(ifr.ifr_ifru.ifru_mtu)
+    }
+
+    /// Extracts the hardware Ethernet MAC address (`AF_LINK` `sockaddr_dl` `LLADDR`) for a BSD interface.
+    public static func getInterfaceMACAddress(_ bsdName: String) -> String? {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
+        defer { freeifaddrs(ifaddr) }
+
+        guard let dataOffset = MemoryLayout<sockaddr_dl>.offset(of: \.sdl_data) else {
+            return nil
+        }
+
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let ptr = cursor {
+            let name = String(cString: ptr.pointee.ifa_name)
+            if name == bsdName,
+               let addr = ptr.pointee.ifa_addr,
+               addr.pointee.sa_family == UInt8(AF_LINK) {
+                let sdl = addr.withMemoryRebound(to: sockaddr_dl.self, capacity: 1) { $0.pointee }
+                let nlen = Int(sdl.sdl_nlen)
+                let alen = Int(sdl.sdl_alen)
+                if alen == 6, Int(sdl.sdl_len) >= dataOffset + nlen + alen {
+                    let lladdr = UnsafeRawPointer(addr)
+                        .advanced(by: dataOffset + nlen)
+                        .assumingMemoryBound(to: UInt8.self)
+                    return (0..<alen)
+                        .map { String(format: "%02x", lladdr[$0]) }
+                        .joined(separator: ":")
+                }
+            }
+            cursor = ptr.pointee.ifa_next
+        }
+        return nil
+    }
+
+    /// Parses IPv4 default gateway addresses keyed by BSD interface name from `netstat -rn -f inet` output.
+    public static func parseDefaultGateways(from netstatOutput: String) -> [String: String] {
+        var gateways: [String: String] = [:]
+        for line in netstatOutput.components(separatedBy: .newlines) {
+            let parts = line.split(whereSeparator: { $0.isWhitespace })
+            guard parts.count >= 4, parts[0] == "default" else { continue }
+
+            let gateway = String(parts[1])
+            let netif = String(parts[3])
+
+            var addr = in_addr()
+            guard inet_pton(AF_INET, gateway, &addr) == 1 else { continue }
+
+            if gateways[netif] == nil {
+                gateways[netif] = gateway
+            }
+        }
+        return gateways
+    }
+
+    /// Queries the live macOS IPv4 routing table (`netstat -rn -f inet`) for default gateways per BSD interface.
+    public static func getDefaultGateways() -> [String: String] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/netstat")
+        process.arguments = ["-rn", "-f", "inet"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0,
+                  let output = String(data: data, encoding: .utf8) else {
+                return [:]
+            }
+            return parseDefaultGateways(from: output)
+        } catch {
+            return [:]
+        }
     }
 }

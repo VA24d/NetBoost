@@ -29,6 +29,39 @@ public struct NetBoostApp: App {
             width: GlassTheme.defaultWindowWidth,
             height: GlassTheme.defaultWindowHeight
         )
+        .commands {
+            CommandMenu("Navigate") {
+                Button("Dashboard") { appState.selectedTab = .dashboard }
+                    .keyboardShortcut("1", modifiers: .command)
+                Button("Hotspot Sharing") { appState.selectedTab = .hotspot }
+                    .keyboardShortcut("2", modifiers: .command)
+                Button("Proxy Dispatcher") { appState.selectedTab = .dispatcher }
+                    .keyboardShortcut("3", modifiers: .command)
+                Button("VPN & Routing") { appState.selectedTab = .vpn }
+                    .keyboardShortcut("4", modifiers: .command)
+                Button("Accelerator") { appState.selectedTab = .accelerator }
+                    .keyboardShortcut("5", modifiers: .command)
+                Button("Campus Doctor") { appState.selectedTab = .doctor }
+                    .keyboardShortcut("6", modifiers: .command)
+                Button("AI Doctor") { appState.selectedTab = .aiDoctor }
+                    .keyboardShortcut("7", modifiers: .command)
+
+                Divider()
+
+                Button("Run Network Auto-Fix") {
+                    Task { await appState.executeAutoFix() }
+                }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+
+                Button("Refresh Telemetry") {
+                    Task {
+                        await appState.refreshHardwareInterfaces()
+                        await appState.runDiagnostics()
+                    }
+                }
+                .keyboardShortcut("r", modifiers: .command)
+            }
+        }
 
         MenuBarExtra {
             MenuBarPopupView()
@@ -40,10 +73,12 @@ public struct NetBoostApp: App {
                     Image(systemName: appState.appLogoStyle.iconName)
                     if !appState.menuBarThroughputText.isEmpty {
                         Text(appState.menuBarThroughputText)
+                            .monospacedDigit()
                     }
                 case .compactSpeed:
                     if !appState.menuBarThroughputText.isEmpty {
                         Text(appState.menuBarThroughputText)
+                            .monospacedDigit()
                     } else {
                         Image(systemName: appState.appLogoStyle.iconName)
                     }

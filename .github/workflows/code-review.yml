@@ -8,7 +8,7 @@ on:
 jobs:
   code-review:
     name: Automated Code Review & Static Analysis
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
@@ -18,19 +18,32 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Review Changes
+      - name: Review Workflow Changes (Advisory)
+        if: github.event_name == 'pull_request'
         uses: reviewdog/action-actionlint@v1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           reporter: github-pr-review
           fail_on_error: false
 
+      - name: Verify Shell Script Syntax
+        run: |
+          echo "==> Checking shell script syntax..."
+          bash -n Scripts/*.sh
+
       - name: Verify Coding Standards & Security
         run: |
           echo "==> Running security and coding standards verification..."
-          # Scan for secrets or sensitive private tokens
-          if grep -rnE "ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|AIza[0-9A-Za-z_-]{35}" Sources/ ; then
-            echo "::error::Hardcoded credentials or API tokens detected in Sources!"
+          # Fail on hardcoded credentials, tokens, or private keys
+          if grep -rnE "ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|AIza[0-9A-Za-z_-]{35}|sk-[A-Za-z0-9]{20,}|BEGIN (RSA|EC|OPENSSH|PGP) PRIVATE KEY" Sources/ Scripts/ Tests/ .github/ ; then
+            echo "::error::Hardcoded credentials or API tokens detected!"
             exit 1
           fi
+
+          # Fail on developer-specific home paths in source, scripts, or workflows
+          if grep -rnE "/Users/[A-Za-z0-9._-]+/" Sources/ Scripts/ .github/ ; then
+            echo "::error::Hardcoded developer home path detected in Sources/, Scripts/, or .github/!"
+            exit 1
+          fi
+
           echo "==> Code review static analysis PASSED."

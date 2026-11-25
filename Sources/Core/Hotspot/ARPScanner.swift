@@ -37,44 +37,72 @@ public final class ARPScanner: @unchecked Sendable {
         return name.isEmpty ? nil : name
     }
 
+    /// Normalizes colon-separated MAC octets to zero-padded lowercase for reliable ARP/bootpd matching.
+    private static func normalizedMAC(_ mac: String) -> String {
+        mac.split(separator: ":")
+            .map { $0.count == 1 ? "0\($0.lowercased())" : $0.lowercased() }
+            .joined(separator: ":")
+    }
+
     /// Parses output from `arp -an` or `arp -a`, filtering for the hotspot subnet (192.168.2.0/24).
     public static func parseHotspotClients(
         arpOutput: String,
         leases: [DHCPLease] = [],
         subnetPrefix: String = "192.168.2."
     ) -> [HotspotClient] {
+        parseHotspotClients(arpOutput: arpOutput, leases: leases, subnetPrefixes: [subnetPrefix])
+    }
+
+    /// Parses output from `arp -an` or `arp -a`, filtering for any of the specified hotspot subnet prefixes and skipping incomplete entries.
+    public static func parseHotspotClients(
+        arpOutput: String,
+        leases: [DHCPLease] = [],
+        subnetPrefixes: [String]
+    ) -> [HotspotClient] {
         var clients: [HotspotClient] = []
         let lines = arpOutput.components(separatedBy: .newlines)
 
         for line in lines {
             // e.g. "? (192.168.2.15) at a4:83:e7:22:11:00 on en0 ifscope [ethernet]"
-            guard line.contains(subnetPrefix) else { continue }
-
-            if let startParen = line.firstIndex(of: "("),
-               let endParen = line.firstIndex(of: ")"),
-               let atRange = line.range(of: " at ") {
-                let ip = String(line[line.index(after: startParen)..<endParen])
-
-                // Skip hotspot gateway itself
-                if ip == "192.168.2.1" { continue }
-
-                let remainder = line[atRange.upperBound...]
-                let mac = String(remainder.split(separator: " ").first ?? "")
-
-                let lease = leases.first {
-                    $0.ipAddress == ip || $0.macAddress.lowercased() == mac.lowercased()
-                }
-                // Check lease hostname first, fallback to genuine reverse DNS lookup, or nil
-                let hostname = lease?.hostname ?? reverseDNS(ipAddress: ip)
-
-                clients.append(HotspotClient(
-                    macAddress: mac,
-                    ipAddress: ip,
-                    hostname: hostname,
-                    txBytes: 0,
-                    rxBytes: 0
-                ))
+            guard let startParen = line.firstIndex(of: "("),
+                  let endParen = line.firstIndex(of: ")"),
+                  startParen < endParen,
+                  let atRange = line.range(of: " at ") else {
+                continue
             }
+
+            let ip = String(line[line.index(after: startParen)..<endParen])
+            guard let matchedPrefix = subnetPrefixes.first(where: { ip.hasPrefix($0) }) else {
+                continue
+            }
+
+            // Skip hotspot gateway (.1) and broadcast (.255) entries
+            if ip == "\(matchedPrefix)1" || ip == "\(matchedPrefix)255" {
+                continue
+            }
+
+            let remainder = line[atRange.upperBound...]
+            let mac = String(remainder.split(separator: " ").first ?? "")
+
+            // Skip unresolved ARP probes and broadcast MACs
+            if mac.isEmpty || mac == "(incomplete)" || mac.lowercased() == "ff:ff:ff:ff:ff:ff" {
+                continue
+            }
+
+            let normMAC = normalizedMAC(mac)
+            let lease = leases.first {
+                $0.ipAddress == ip || normalizedMAC($0.macAddress) == normMAC
+            }
+            // Check lease hostname first, fallback to genuine reverse DNS lookup, or nil
+            let hostname = lease?.hostname ?? reverseDNS(ipAddress: ip)
+
+            clients.append(HotspotClient(
+                macAddress: mac,
+                ipAddress: ip,
+                hostname: hostname,
+                txBytes: 0,
+                rxBytes: 0
+            ))
         }
         return clients
     }
@@ -93,15 +121,23 @@ public final class ARPScanner: @unchecked Sendable {
         }
     }
 
-    /// Queries live system ARP table via `/usr/sbin/arp -an` and parses active hotspot clients.
+    /// Queries live system ARP table via `/usr/sbin/arp -an` and parses active hotspot clients for a single subnet prefix.
     public func scan(
         subnetPrefix: String = "192.168.2.",
+        leases: [DHCPLease] = []
+    ) async throws -> [HotspotClient] {
+        try await scan(subnetPrefixes: [subnetPrefix], leases: leases)
+    }
+
+    /// Queries live system ARP table via `/usr/sbin/arp -an` and parses active hotspot clients across multiple subnet prefixes.
+    public func scan(
+        subnetPrefixes: [String],
         leases: [DHCPLease] = []
     ) async throws -> [HotspotClient] {
         let output = try await ShellCommand.run("/usr/sbin/arp", arguments: ["-an"])
         guard output.succeeded else { return [] }
 
-        var clients = Self.parseHotspotClients(arpOutput: output.stdout, leases: leases, subnetPrefix: subnetPrefix)
+        var clients = Self.parseHotspotClients(arpOutput: output.stdout, leases: leases, subnetPrefixes: subnetPrefixes)
         mergeStats(for: &clients)
         return clients
     }

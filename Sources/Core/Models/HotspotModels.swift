@@ -78,8 +78,8 @@ public struct HotspotConfiguration: Codable, Sendable, Equatable {
     public var isActive: Bool
 
     public init(
-        ssid: String = "NetBoost-Hotspot",
-        password: String = "CampusNet2026!",
+        ssid: String = "NetBoost",
+        password: String = "12345678",
         securityType: HotspotSecurityType = .wpa2Wpa3Transition,
         subnet: String = "192.168.2.0/24",
         gateway: String = "192.168.2.1",

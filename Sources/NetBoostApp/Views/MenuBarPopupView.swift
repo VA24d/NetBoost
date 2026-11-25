@@ -8,178 +8,212 @@ public struct MenuBarPopupView: View {
     public init() {}
 
     private var primaryInterfaceDisplay: String {
-        let name = appState.activeEnvironment.isCampusLAN ? "Ethernet" : "Wi-Fi"
-        return "\(name): \(appState.primaryInterfaceIP)"
+        let name = appState.primaryInterface.isEmpty ? "en10" : appState.primaryInterface
+        return "\(name) (\(appState.primaryInterfaceIP))"
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Live Speed Indicator Header
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Image(systemName: "bolt.fill")
-                        .foregroundColor(GlassTheme.cyanNeon)
-                    Text("NetBoost Network Controller")
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundColor(.white)
-                    Spacer()
-                    StatusPill(
-                        text: appState.activeStatePill,
-                        color: appState.activeEnvironment.isCampusLAN ? GlassTheme.sapphireBlue : GlassTheme.amberWarning
-                    )
-                }
-
-                HStack(spacing: 16) {
-                    Text(appState.menuBarThroughputText)
-                        .font(.system(size: 12, weight: .bold, design: .monospaced))
-                        .foregroundColor(GlassTheme.cyanSapphire)
-                }
-            }
-            .padding(10)
-            .glassCard(cornerRadius: 10)
-
-            // Primary Interface Info
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Primary Interface:")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(GlassTheme.textSecondary)
-                Spacer()
-                Text(primaryInterfaceDisplay)
-                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                Image(systemName: appState.appLogoStyle.iconName)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(GlassTheme.cyanSapphire)
+                Text("NetBoost")
+                    .font(.system(size: 13.5, weight: .semibold))
                     .foregroundColor(.white)
+                Spacer()
+                StatusPill(
+                    text: appState.activeStatePill,
+                    color: appState.activeEnvironment.isCampusLAN ? GlassTheme.sapphireBlue : GlassTheme.amberWarning,
+                    showPulse: false
+                )
             }
-            .padding(.horizontal, 4)
 
-            Divider().background(Color.white.opacity(0.1))
+            HStack(spacing: 8) {
+                Text(appState.menuBarThroughputText.isEmpty
+                     ? SpeedFormatter.formatMenuBarThroughput(up: appState.smoothedUploadBps, down: appState.smoothedDownloadBps)
+                     : appState.menuBarThroughputText)
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+                    .foregroundColor(GlassTheme.cyanSapphire)
+                Spacer(minLength: 6)
+                Text(primaryInterfaceDisplay)
+                    .font(.system(size: 11, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundColor(GlassTheme.textSecondary)
+            }
+            .padding(9)
+            .background(GlassTheme.controlFill)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-            // Quick Actions & Toggles
-            VStack(spacing: 6) {
-                // Toggle Hotspot
-                Button {
-                    Task { try? await appState.toggleHotspot() }
-                } label: {
-                    HStack {
-                        Image(systemName: "personalhotspot")
-                            .foregroundColor(appState.isHotspotActive ? GlassTheme.emeraldGreen : GlassTheme.textTertiary)
-                        Text("Toggle Hotspot")
-                        Spacer()
-                        Text(appState.isHotspotActive ? "ON" : "OFF")
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
-                            .foregroundColor(appState.isHotspotActive ? GlassTheme.emeraldGreen : GlassTheme.textTertiary)
+            Divider()
+
+            VStack(spacing: 5) {
+                quickRowButton(
+                    icon: "personalhotspot",
+                    title: "Hotspot Sharing",
+                    status: appState.isHotspotActive ? "\(appState.connectedClients.count) active" : "Off",
+                    color: appState.isHotspotActive ? GlassTheme.emeraldGreen : GlassTheme.textTertiary
+                ) {
+                    Task {
+                        do {
+                            try await appState.toggleHotspot()
+                        } catch {
+                            appState.hotspotError = error.localizedDescription
+                            appState.appendRepairLog("Hotspot toggle error: \(error.localizedDescription)")
+                        }
                     }
-                    .padding(8)
-                    .background(Color.white.opacity(0.04))
-                    .cornerRadius(6)
                 }
-                .buttonStyle(.plain)
 
-                // Toggle VPN
-                Button {
-                    Task { try? await appState.toggleVPN() }
-                } label: {
-                    HStack {
-                        Image(systemName: "lock.shield")
-                            .foregroundColor(appState.vpnStatus == .connected ? GlassTheme.emeraldGreen : GlassTheme.textTertiary)
-                        Text("Toggle VPN")
-                        Spacer()
-                        Text(appState.vpnStatus == .connected ? "CONNECTED" : "OFF")
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
-                            .foregroundColor(appState.vpnStatus == .connected ? GlassTheme.emeraldGreen : GlassTheme.textTertiary)
+                quickRowButton(
+                    icon: "arrow.triangle.branch",
+                    title: "Proxy Dispatcher",
+                    status: appState.isProxyActive ? "Listening" : "Off",
+                    color: appState.isProxyActive ? GlassTheme.cyanSapphire : GlassTheme.textTertiary
+                ) {
+                    Task {
+                        do {
+                            try await appState.toggleProxy()
+                        } catch {
+                            appState.proxyError = error.localizedDescription
+                            appState.appendRepairLog("Proxy toggle error: \(error.localizedDescription)")
+                        }
                     }
-                    .padding(8)
-                    .background(Color.white.opacity(0.04))
-                    .cornerRadius(6)
                 }
-                .buttonStyle(.plain)
 
-                // Auto-Fix Network Trigger
+                quickRowButton(
+                    icon: "lock.shield",
+                    title: "VPN (\(appState.activeVPNProfile))",
+                    status: appState.vpnStatus == .connected ? "Connected" : "Off",
+                    color: appState.vpnStatus == .connected ? GlassTheme.emeraldGreen : GlassTheme.textTertiary
+                ) {
+                    Task {
+                        do {
+                            try await appState.toggleVPN()
+                        } catch {
+                            appState.vpnError = error.localizedDescription
+                            appState.appendRepairLog("VPN toggle error: \(error.localizedDescription)")
+                        }
+                    }
+                }
+
                 Button {
                     Task { await appState.executeAutoFix() }
                 } label: {
                     HStack {
                         Image(systemName: "bolt.fill")
                             .foregroundColor(GlassTheme.amberWarning)
-                        Text(appState.isAutoFixRunning ? "Fixing Network..." : "Auto-Fix Network")
-                            .foregroundColor(GlassTheme.amberWarning)
+                        Text(appState.isAutoFixRunning ? "Fixing Network..." : "Run Auto-Fix")
+                            .foregroundColor(.white)
                         Spacer()
                         if appState.isAutoFixRunning {
-                            ProgressView().controlSize(.small).colorScheme(.dark)
+                            ProgressView().controlSize(.small)
                         }
                     }
-                    .padding(8)
-                    .background(GlassTheme.amberWarning.opacity(0.1))
-                    .cornerRadius(6)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(GlassTheme.sapphireBlue.opacity(0.18))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .disabled(appState.isAutoFixRunning)
             }
 
-            // Status Bar & Logo Pickers
+            Divider()
+
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text("Menu Bar Style:")
-                        .font(.system(size: 11, weight: .medium))
+                    Text("Menu Bar")
+                        .font(.system(size: 11.5))
                         .foregroundColor(GlassTheme.textSecondary)
                     Spacer()
                     Picker("", selection: $appState.menuBarIconStyle) {
-                        ForEach(MenuBarIconStyle.allCases) { s in
-                            Text(s.rawValue).tag(s)
+                        ForEach(MenuBarIconStyle.allCases) { style in
+                            Text(style.rawValue).tag(style)
                         }
                     }
+                    .labelsHidden()
                     .pickerStyle(.menu)
-                    .frame(width: 140)
+                    .frame(width: 145)
                 }
 
                 HStack {
-                    Text("App Logo Style:")
-                        .font(.system(size: 11, weight: .medium))
+                    Text("App Icon")
+                        .font(.system(size: 11.5))
                         .foregroundColor(GlassTheme.textSecondary)
                     Spacer()
                     Picker("", selection: $appState.appLogoStyle) {
-                        ForEach(AppLogoStyle.allCases) { l in
-                            Text(l.rawValue).tag(l)
+                        ForEach(AppLogoStyle.allCases) { style in
+                            Text(style.rawValue).tag(style)
                         }
                     }
+                    .labelsHidden()
                     .pickerStyle(.menu)
-                    .frame(width: 140)
+                    .frame(width: 145)
                 }
             }
-            .padding(8)
-            .background(Color.white.opacity(0.04))
-            .cornerRadius(8)
 
-            Divider().background(Color.white.opacity(0.1))
+            Divider()
 
-            // App Window & Lifecycle Controls
             HStack {
-                Button("Open NetBoost Window") {
+                Button("Open NetBoost") {
                     NSApp.activate(ignoringOtherApps: true)
                     for window in NSApp.windows where window.canBecomeMain {
                         window.makeKeyAndOrderFront(nil)
                     }
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(GlassTheme.cyanNeon)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(GlassTheme.cyanSapphire)
 
                 Spacer()
 
-                Button("Quit NetBoost") {
+                Button("Quit") {
                     NSApp.terminate(nil)
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(GlassTheme.redAlert)
+                .font(.system(size: 12))
+                .foregroundColor(GlassTheme.textSecondary)
             }
-            .padding(.horizontal, 4)
         }
-        .padding(14)
-        .frame(width: 320)
-        .background(GlassTheme.backgroundDark.opacity(0.95))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.white.opacity(0.15), lineWidth: 1)
-        )
+        .padding(12)
+        .frame(width: 300)
+        .preferredColorScheme(.dark)
+        .background(VisualEffectBackground(material: .popover, blendingMode: .behindWindow))
+    }
+
+    private func quickRowButton(
+        icon: String,
+        title: String,
+        status: String,
+        color: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .frame(width: 16)
+                    .foregroundColor(color)
+                Text(title)
+                    .font(.system(size: 12.5))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundColor(.white)
+                Spacer(minLength: 6)
+                Text(status)
+                    .font(.system(size: 11, design: .monospaced))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .foregroundColor(color)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(GlassTheme.controlFill)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 }

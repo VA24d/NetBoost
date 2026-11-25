@@ -1,95 +1,18 @@
+import AppKit
+import Darwin
 import Foundation
-import SwiftUI
 import NetBoostCore
+import SwiftUI
 
-// MARK: - Navigation Tabs
-
-public enum AppNavigationTab: String, CaseIterable, Identifiable, Sendable {
-    case dashboard = "Dashboard"
-    case hotspot = "Hotspot"
-    case dispatcher = "Dispatcher"
-    case vpn = "VPN & Routing"
-    case accelerator = "Accelerator"
-    case doctor = "Campus Doctor"
-    case aiDoctor = "AI Doctor"
-
-    public var id: String { rawValue }
-
-    public var iconName: String {
-        switch self {
-        case .dashboard: return "square.grid.2x2"
-        case .hotspot: return "personalhotspot"
-        case .dispatcher: return "arrow.triangle.branch"
-        case .vpn: return "lock.shield"
-        case .accelerator: return "bolt.horizontal"
-        case .doctor: return "cross.case"
-        case .aiDoctor: return "cpu"
-        }
-    }
-}
-
-// MARK: - Tool Execution Log Model
-
-public struct ToolExecutionLog: Identifiable, Sendable, Equatable {
-    public let id: UUID
-    public let timestamp: Date
-    public let toolName: String
-    public let arguments: String
-    public let success: Bool
-    public let output: String
-
-    public init(
-        id: UUID = UUID(),
-        timestamp: Date = Date(),
-        toolName: String,
-        arguments: String,
-        success: Bool,
-        output: String
-    ) {
-        self.id = id
-        self.timestamp = timestamp
-        self.toolName = toolName
-        self.arguments = arguments
-        self.success = success
-        self.output = output
-    }
-}
-
-// MARK: - Customization Enums
-
-public enum MenuBarIconStyle: String, CaseIterable, Identifiable, Sendable, Codable {
-    case iconAndSpeed = "Icon + Speed"
-    case compactSpeed = "Compact Speed"
-    case minimalBadge = "Minimal Badge"
-
-    public var id: String { rawValue }
-}
-
-public enum AppLogoStyle: String, CaseIterable, Identifiable, Sendable, Codable {
-    case sapphireLightning = "Sapphire Bolt"
-    case liquidWaveform = "Liquid Waveform"
-    case networkCore = "Network Core"
-
-    public var id: String { rawValue }
-
-    public var iconName: String {
-        switch self {
-        case .sapphireLightning: return "bolt.horizontal.circle.fill"
-        case .liquidWaveform: return "waveform.path.ecg"
-        case .networkCore: return "network"
-        }
-    }
-}
-
-// MARK: - AppState Central Coordinator
+// MARK: - Global Reactive State Store
 
 @MainActor
 public final class AppState: ObservableObject {
 
-    // MARK: - Navigation
+    // Navigation
     @Published public var selectedTab: AppNavigationTab = .dashboard
 
-    // MARK: - Injected Protocol Controllers
+    // Injected Services
     public let proxyDispatcher: any ProxyDispatcherProtocol
     public let vpnController: any VPNControllerProtocol
     public let downloadManager: any DownloadManagerProtocol
@@ -97,8 +20,13 @@ public final class AppState: ObservableObject {
     public let hotspotController: any HotspotControllerProtocol
     public let llmBridge: (any LLMDoctorBridgeProtocol)?
     public let pasteboardWatcher: any ClipboardWatcherProtocol
+    internal let injectedNetworkSensor: NetworkSensor?
+    internal let routePinningEngine: RoutePinningEngine
+    internal let serviceOrderManager: ServiceOrderManager
+    internal var activeNetworkSensor: NetworkSensor?
+    internal var vpnRuleEngine: VPNRuleEngine?
 
-    // MARK: - Live Throughput & Header State
+    // Live Throughput & Header State
     @Published public var currentDownloadBps: Double = 0
     @Published public var currentUploadBps: Double = 0
     @Published public var smoothedDownloadBps: Double = 0
@@ -111,7 +39,10 @@ public final class AppState: ObservableObject {
     @Published public var isAutoFixRunning: Bool = false
     @Published public var autoFixSummary: String? = nil
 
-    // MARK: - Hotspot State
+    // Hardware Interfaces & Telemetry
+    @Published public var hardwareInterfaces: [NetworkInterfaceInfo] = []
+
+    // Hotspot State
     @Published public var isHotspotActive: Bool = false
     @Published public var isRadioBroadcasting: Bool = false
     @Published public var hotspotConfig: HotspotConfiguration = .default
@@ -137,124 +68,107 @@ public final class AppState: ObservableObject {
     @Published public var upstreamInterface: String = "en10"
     @Published public var downstreamInterface: String = "en0"
     @Published public var hotspotError: String? = nil
+    @Published public internal(set) var isWiFiConnectedToExternalNetwork: Bool = false
 
-    public var isWiFiConnectedToExternalNetwork: Bool {
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return false }
-        defer { freeifaddrs(ifaddr) }
-
-        var cursor: UnsafeMutablePointer<ifaddrs>? = first
-        while let ptr = cursor {
-            let name = String(cString: ptr.pointee.ifa_name)
-            if name == "en0", let addr = ptr.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) {
-                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                if getnameinfo(addr, socklen_t(addr.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
-                    let ip = hostname.withUnsafeBufferPointer { ptr in
-                        guard let base = ptr.baseAddress else { return "" }
-                        return String(cString: base)
-                    }
-                    if ip != "192.168.2.1" && !ip.hasPrefix("127.") {
-                        return true
-                    }
-                }
-            }
-            cursor = ptr.pointee.ifa_next
-        }
-        return false
-    }
-
-    // MARK: - Customization Options (Logo & Status Bar)
+    // Appearance Preferences
     @Published public var menuBarIconStyle: MenuBarIconStyle = .iconAndSpeed
     @Published public var appLogoStyle: AppLogoStyle = .sapphireLightning
 
-    // MARK: - Upfront Privilege Authorization
+    // One-Time Persistent Privilege Helper Authorization
     @Published public var isAuthorized: Bool = PrivilegeHelper.isAuthorized
     @Published public var authorizationSummary: String? = nil
 
-    // Private tracking for hardware interface throughput
-    private var lastInterfaceIn: UInt64 = 0
-    private var lastInterfaceOut: UInt64 = 0
-    private var lastInterfaceSampleTime: Date = Date()
-    private var lastTrackedInterface: String? = nil
+    // Hardware byte counters for EMA throughput
+    internal var lastInterfaceIn: UInt64 = 0
+    internal var lastInterfaceOut: UInt64 = 0
+    internal var lastInterfaceSampleTime: Date = Date()
+    internal var lastTrackedInterface: String? = nil
 
-    public func requestUpfrontAuthorization() async {
-        do {
-            let granted = try await PrivilegeHelper.requestAuthorization()
-            self.isAuthorized = granted
-            if granted {
-                self.authorizationSummary = "Authorized"
-                appendRepairLog("🔐 Administrator privileges successfully authorized for NetBoost session")
-            }
-        } catch PrivilegeError.elevationDenied {
-            self.isAuthorized = false
-            self.authorizationSummary = "Authorization Cancelled"
-            appendRepairLog("⚠️ Administrator authorization cancelled by user")
-        } catch {
-            self.isAuthorized = false
-            self.authorizationSummary = "Authorization Failed"
-            appendRepairLog("❌ Authorization error: \(error.localizedDescription)")
-        }
-    }
-
-    public var canEnableHotspot: Bool {
-        upstreamInterface == "en10" || activeEnvironment.isCampusLAN || (activeEnvironment.primaryInterface == "en10")
-    }
-
-    // MARK: - Proxy Dispatcher State
+    // Proxy Dispatcher & Route Pinning State
     @Published public var isProxyActive: Bool = false
     @Published public var proxyPorts: [Int: String] = [1080: "en10", 1081: "en0", 1082: "auto"]
     @Published public var activeConnections: [ProxyConnectionInfo] = []
+    @Published public var proxyTotalBytesRead: Int64 = 0
+    @Published public var proxyTotalBytesWritten: Int64 = 0
     @Published public var copiedSnippetMessage: String? = nil
     @Published public var proxyError: String? = nil
+    @Published public var pinnedRoutes: [PinnedRoute] = []
+    @Published public var routePinResultMessage: String? = nil
+    @Published public var cliTaskOutput: String = ""
+    @Published public var isRunningCLITask: Bool = false
 
-    // MARK: - VPN & Routing State
+    // VPN & Service Ordering State
     @Published public var vpnStatus: VPNStatus = .disconnected
     @Published public var activeVPNProfile: String = "macos.ovpn"
     @Published public var installedProfiles: [VPNServiceProfile] = []
+    @Published public var loadedProfileInfo: VPNProfileInfo? = nil
     @Published public var parsedRoutes: [VPNRouteEntry] = []
     @Published public var routeConflicts: [String] = []
-    @Published public var isVPNAutomationEnabled: Bool = true
+    @Published public var conflictReport: RouteConflictReport? = nil
+    @Published public var isVPNAutomationEnabled: Bool = true {
+        didSet {
+            vpnRuleEngine?.updatePolicy(VPNRulePolicy(autoConnectEnabled: isVPNAutomationEnabled, targetProfileName: activeVPNProfile))
+        }
+    }
     @Published public var networkServiceOrder: [String] = ["USB 10/100 LAN", "Wi-Fi", "Thunderbolt Bridge"]
+    @Published public var serviceEntries: [ServiceOrderManager.ServiceEntry] = []
     @Published public var lastVPNToggleTime: Date = Date.distantPast
     @Published public var vpnError: String? = nil
 
-    // MARK: - Accelerator State
+    // Download Accelerator State
     @Published public var downloadURLInput: String = ""
     @Published public var detectedClipboardURL: URL? = nil
     @Published public var selectedChunkCount: Int = 8
     @Published public var expectedChecksum: String = ""
     @Published public var selectedChecksumAlgorithm: String = "SHA-256"
+    @Published public var downloadDirectory: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? FileManager.default.temporaryDirectory
     @Published public var activeDownloadTask: DownloadTaskInfo? = nil
     @Published public var checksumMatchStatus: Bool? = nil
     @Published public var downloadError: String? = nil
 
-    // MARK: - Campus Doctor State
+    // Campus Doctor State
+    @Published public var selectedRepairService: String = "Wi-Fi"
+    @Published public var availableServices: [String] = ["Wi-Fi", "USB 10/100 LAN"]
+    @Published public var isPrivateRelayIsolated: Bool = false
     @Published public var endpointRTTs: [String: ProbeResult] = [:]
     @Published public var captivePortalStatus: CaptivePortalStatus = .notDetected
+    @Published public var tracerouteTarget: String = "turing.iiit.ac.in"
+    @Published public var tracerouteHops: [String] = []
+    @Published public var isTracerouting: Bool = false
     @Published public var repairLogs: [String] = []
     @Published public var activeIssues: [DetectedIssue] = []
 
     public static let targetEndpoints: [String] = [
-        "10.1.36.1",        // Switch Gateway
-        "10.8.0.80",        // Campus Core
-        "turing.iiit.ac.in", // Campus HPC Server
-        "google.com",        // External DNS/Web
-        "claude.com"         // External AI Cloud
+        "10.1.36.1",
+        "10.8.0.80",
+        "turing.iiit.ac.in",
+        "google.com",
+        "claude.com"
     ]
 
-    // MARK: - AI Doctor State
+    // AI Doctor State
     @Published public var lmStudioEndpoint: URL = LLMDoctorBridge.defaultChatEndpoint
+    @Published public var lmStudioEndpointString: String = LLMDoctorBridge.defaultChatEndpoint.absoluteString
+    @Published public var availableAIModels: [String] = []
+    @Published public var selectedAIModel: String = "" {
+        didSet {
+            (llmBridge as? LLMDoctorBridge)?.selectedModel = selectedAIModel.isEmpty ? nil : selectedAIModel
+        }
+    }
     @Published public var isLMStudioConnected: Bool = false
     @Published public var chatMessages: [ChatMessage] = []
     @Published public var isAIAnalyzing: Bool = false
     @Published public var latestAnalysis: LLMAnalysis? = nil
     @Published public var toolExecutionLogs: [ToolExecutionLog] = []
 
-    // MARK: - Background Tasks
-    private var throughputTimerTask: Task<Void, Never>?
-    private var rttTimerTask: Task<Void, Never>?
-    private var clipboardStreamTask: Task<Void, Never>?
-    private var downloadStreamTask: Task<Void, Never>?
+    // Background Tasks
+    internal var throughputTimerTask: Task<Void, Never>?
+    internal var rttTimerTask: Task<Void, Never>?
+    internal var clipboardStreamTask: Task<Void, Never>?
+    internal var downloadStreamTask: Task<Void, Never>?
+    internal var sensorStreamTask: Task<Void, Never>?
+    internal var vpnRuleTask: Task<Void, Never>?
+    internal var bootstrapTask: Task<Void, Never>?
 
     // MARK: - Initializer
 
@@ -266,7 +180,10 @@ public final class AppState: ObservableObject {
         hotspotController: any HotspotControllerProtocol = HotspotNATController(),
         llmBridge: (any LLMDoctorBridgeProtocol)? = LLMDoctorBridge(),
         pasteboardWatcher: any ClipboardWatcherProtocol = ClipboardWatcher(),
-        startBackgroundTimers: Bool = true
+        startBackgroundTimers: Bool = true,
+        networkSensor: NetworkSensor? = nil,
+        routePinningEngine: RoutePinningEngine? = nil,
+        serviceOrderManager: ServiceOrderManager? = nil
     ) {
         self.proxyDispatcher = proxyDispatcher
         self.vpnController = vpnController
@@ -275,11 +192,16 @@ public final class AppState: ObservableObject {
         self.hotspotController = hotspotController
         self.llmBridge = llmBridge
         self.pasteboardWatcher = pasteboardWatcher
+        self.injectedNetworkSensor = networkSensor
+        self.routePinningEngine = routePinningEngine ?? RoutePinningEngine()
+        self.serviceOrderManager = serviceOrderManager ?? ServiceOrderManager()
 
-        // Initialize active network state pill
         self.updateEnvironment(.defaultCampusLAN)
 
         if startBackgroundTimers {
+            Task { [weak self] in
+                await self?.refreshAuthorizationStatus()
+            }
             self.startBackgroundTasks()
         }
     }
@@ -289,15 +211,97 @@ public final class AppState: ObservableObject {
         rttTimerTask?.cancel()
         clipboardStreamTask?.cancel()
         downloadStreamTask?.cancel()
+        sensorStreamTask?.cancel()
+        vpnRuleTask?.cancel()
+        bootstrapTask?.cancel()
     }
 
-    // MARK: - Throughput & Speed Updates
+    // MARK: - Authorization & Network State
+
+    nonisolated internal static func checkExternalWiFiConnected(downstream: String) -> Bool {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return false }
+        defer { freeifaddrs(ifaddr) }
+
+        let requiredFlags = UInt32(IFF_UP | IFF_RUNNING)
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let ptr = cursor {
+            let flags = ptr.pointee.ifa_flags
+            let name = String(cString: ptr.pointee.ifa_name)
+            if name == downstream,
+               (flags & requiredFlags) == requiredFlags,
+               let addr = ptr.pointee.ifa_addr,
+               addr.pointee.sa_family == UInt8(AF_INET) {
+                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(addr, socklen_t(addr.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
+                    let ip = hostname.withUnsafeBufferPointer { buf in
+                        guard let base = buf.baseAddress else { return "" }
+                        return String(cString: base)
+                    }
+                    if !ip.isEmpty
+                        && ip != "192.168.2.1"
+                        && ip != "192.168.3.1"
+                        && !ip.hasPrefix("127.")
+                        && !ip.hasPrefix("169.254.") {
+                        return true
+                    }
+                }
+            }
+            cursor = ptr.pointee.ifa_next
+        }
+        return false
+    }
+
+    public func syncAuthorizationStatus() {
+        Task { [weak self] in
+            await self?.refreshAuthorizationStatus()
+        }
+    }
+
+    public func refreshAuthorizationStatus() async {
+        let ready = await PrivilegeHelper.syncAuthorizationFromDaemonAsync()
+        self.isAuthorized = ready || PrivilegeHelper.isRoot
+        if ready {
+            self.authorizationSummary = "Authorized"
+        }
+    }
+
+    public func requestUpfrontAuthorization() async {
+        do {
+            let granted = try await PrivilegeHelper.requestAuthorization()
+            self.isAuthorized = granted
+            if granted {
+                self.authorizationSummary = "Authorized"
+                appendRepairLog("Privileged helper daemon authorized persistently")
+            }
+        } catch PrivilegeError.elevationDenied {
+            self.isAuthorized = false
+            self.authorizationSummary = "Authorization Cancelled"
+            appendRepairLog("Administrator authorization cancelled by user")
+        } catch {
+            self.isAuthorized = false
+            self.authorizationSummary = "Authorization Failed"
+            appendRepairLog("Authorization error: \(error.localizedDescription)")
+        }
+    }
+
+    public func uninstallPrivilegedHelper() async {
+        do {
+            try await PrivilegeHelper.uninstallDaemon()
+            self.isAuthorized = PrivilegeHelper.isRoot
+            self.authorizationSummary = nil
+            appendRepairLog("Privileged helper daemon uninstalled")
+        } catch {
+            appendRepairLog("Helper uninstall failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Throughput & Environment Updates
 
     public func updateSpeeds(download: Double, upload: Double) {
         currentDownloadBps = download
         currentUploadBps = upload
 
-        // EMA smoothing: alpha = 0.25 to prevent needle / label jitter
         smoothedDownloadBps = SpeedMetricsCalculator.updateEMA(
             previousSpeed: smoothedDownloadBps,
             instantaneousSpeed: download,
@@ -345,450 +349,27 @@ public final class AppState: ObservableObject {
         }
     }
 
-    // MARK: - Quick Auto-Fix Action
-
-    public func executeAutoFix() async {
-        guard !isAutoFixRunning else { return }
-        isAutoFixRunning = true
-        autoFixSummary = nil
-        appendRepairLog("⚡ Auto-Fix initiated: atomic batch MTU (1280) -> DNS -> ARP")
-
-        do {
-            try await campusDoctor.executeBatchAutoFix(service: "Wi-Fi", mtu: 1280)
-            autoFixSummary = "Auto-Fix Complete: MTU, DNS & ARP Restored"
-            appendRepairLog("🎉 \(autoFixSummary!)")
-        } catch PrivilegeError.elevationDenied {
-            let errString = "Auto-Fix cancelled: Administrator elevation was denied"
-            autoFixSummary = "Auto-Fix error: \(errString)"
-            appendRepairLog("❌ \(autoFixSummary!)")
-        } catch {
-            let errString = "Auto-Fix error: \(error.localizedDescription)"
-            autoFixSummary = errString
-            appendRepairLog("❌ \(errString)")
+    public func refreshHardwareInterfaces() async {
+        let interfaces = await SystemInterfaceProvider().fetchInterfaces()
+        hardwareInterfaces = interfaces
+        let activeUp = interfaces.filter { $0.isUp }
+        let physicalUp = activeUp.filter { iface in
+            guard iface.bsdName != "en0", iface.ipv4Address != nil else { return false }
+            return HotspotNATController.isEligibleHotspotInterface(iface.bsdName)
+                && !iface.bsdName.lowercased().hasPrefix("ipsec")
+                && !iface.bsdName.lowercased().hasPrefix("ppp")
+        }
+        if let preferred = physicalUp.first(where: { $0.bsdName == "en10" }) ?? physicalUp.first(where: { $0.bsdName.hasPrefix("en") }) {
+            upstreamInterface = preferred.bsdName
+        }
+        if activeUp.contains(where: { $0.bsdName == "en0" }) {
+            downstreamInterface = "en0"
         }
 
-        isAutoFixRunning = false
-    }
-
-    // MARK: - Hotspot Actions
-
-    public func toggleHotspot() async throws {
-        guard canEnableHotspot else {
-            hotspotError = "Hotspot sharing requires active Wired Ethernet (en10)."
-            appendRepairLog("⚠️ Hotspot toggle failed: en10 not active")
-            return
-        }
-
-        if isHotspotActive {
-            try await hotspotController.stopHotspot()
-            isHotspotActive = false
-            isRadioBroadcasting = false
-            connectedClients = []
-            hotspotConfig.isActive = false
-            appendRepairLog("Hotspot stopped on \(downstreamInterface)")
-        } else {
-            hotspotConfig.upstreamInterface = upstreamInterface
-            hotspotConfig.interfaceName = downstreamInterface
-            hotspotConfig.ssid = hotspotSSID
-            hotspotConfig.password = hotspotPassword
-            hotspotConfig.securityType = hotspotSecurityType
-            hotspotController.updateConfiguration(hotspotConfig)
-
-            try await hotspotController.startHotspot(configuration: hotspotConfig)
-            isHotspotActive = true
-            hotspotConfig.isActive = true
-            isRadioBroadcasting = await hotspotController.isRadioBroadcasting()
-            connectedClients = await hotspotController.connectedClients()
-            appendRepairLog("Hotspot started sharing \(upstreamInterface) -> \(downstreamInterface)")
-        }
-        hotspotError = nil
-    }
-
-    public func openSystemSharingSettings() {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["x-apple.systempreferences:com.apple.Sharing-Settings.extension"]
-        try? process.run()
-    }
-
-    public func refreshHotspotClients() async {
-        guard isHotspotActive else { return }
-        isRadioBroadcasting = await hotspotController.isRadioBroadcasting()
-        connectedClients = await hotspotController.connectedClients()
-    }
-
-    // MARK: - Proxy Dispatcher Actions
-
-    public func toggleProxy() async throws {
-        if isProxyActive {
-            try await proxyDispatcher.stop()
-            isProxyActive = false
-            activeConnections = []
-            appendRepairLog("Proxy Dispatcher stopped.")
-        } else {
-            try await proxyDispatcher.start(ports: proxyPorts)
-            isProxyActive = true
-            activeConnections = proxyDispatcher.activeConnections
-            appendRepairLog("Proxy Dispatcher started on ports: \(proxyPorts.keys.sorted())")
-        }
-        proxyError = nil
-    }
-
-    public func generateShellSnippet(port: Int) -> String {
-        let snippet = proxyDispatcher.generateShellSnippet(port: port)
-        copiedSnippetMessage = "Copied snippet for port \(port)"
-        return snippet
-    }
-
-    // MARK: - VPN Actions
-
-    public func toggleVPN() async throws {
-        // 0.5s toggle debounce check
-        let now = Date()
-        guard now.timeIntervalSince(lastVPNToggleTime) >= 0.5 else {
-            appendRepairLog("VPN toggle debounced (< 0.5s)")
-            return
-        }
-        lastVPNToggleTime = now
-
-        if vpnStatus == .connected {
-            try await vpnController.disconnect(profileName: activeVPNProfile)
-            vpnStatus = .disconnected
-            appendRepairLog("VPN disconnected: \(activeVPNProfile)")
-        } else {
-            try await vpnController.connect(profileName: activeVPNProfile)
-            vpnStatus = .connected
-            appendRepairLog("VPN connected: \(activeVPNProfile)")
-        }
-        vpnError = nil
-    }
-
-    public func checkRouteConflicts() {
-        let sampleProfile = VPNProfileInfo(
-            name: activeVPNProfile,
-            serverAddress: "vpn.campus.net",
-            routes: [
-                VPNRouteEntry(destinationSubnet: "10.1.0.0", mask: "255.255.0.0"),
-                VPNRouteEntry(destinationSubnet: "0.0.0.0", mask: "0.0.0.0")
-            ]
-        )
-        routeConflicts = vpnController.detectConflicts(profile: sampleProfile, currentLAN: "10.1.36.0/22")
-    }
-
-    public func reorderServices(ordered: [String]) async throws {
-        try await campusDoctor.reorderServices(ordered: ordered)
-        networkServiceOrder = ordered
-        appendRepairLog("Network service order updated: \(ordered.joined(separator: " -> "))")
-    }
-
-    // MARK: - Accelerator Actions
-
-    public func startDownload() async throws {
-        let trimmed = downloadURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmed),
-              let scheme = url.scheme?.lowercased(),
-              (scheme == "http" || scheme == "https"),
-              let host = url.host,
-              !host.isEmpty else {
-            downloadError = "Invalid download URL: must begin with http:// or https:// and include a valid host"
-            return
-        }
-
-        let filename = (url.lastPathComponent.isEmpty || url.lastPathComponent == "/") ? "download.bin" : url.lastPathComponent
-        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-        let expected = expectedChecksum.isEmpty ? nil : expectedChecksum
-
-        appendRepairLog("Starting accelerated download: \(url.absoluteString) with \(selectedChunkCount) chunks")
-        activeDownloadTask = try await downloadManager.startDownload(
-            url: url,
-            destination: destination,
-            chunksCount: selectedChunkCount,
-            expectedChecksum: expected
-        )
-        downloadError = nil
-    }
-
-    public func pauseDownload() async throws {
-        guard let task = activeDownloadTask else { return }
-        try await downloadManager.pauseDownload(id: task.id)
-        appendRepairLog("Download paused: \(task.id)")
-    }
-
-    public func resumeDownload() async throws {
-        guard let task = activeDownloadTask else { return }
-        try await downloadManager.resumeDownload(id: task.id)
-        appendRepairLog("Download resumed: \(task.id)")
-    }
-
-    public func cancelDownload() async throws {
-        guard let task = activeDownloadTask else { return }
-        try await downloadManager.cancelDownload(id: task.id)
-        activeDownloadTask = nil
-        appendRepairLog("Download cancelled: \(task.id)")
-    }
-
-    public func verifyChecksum() async -> Bool {
-        guard let task = activeDownloadTask, !expectedChecksum.isEmpty else {
-            checksumMatchStatus = nil
-            return false
-        }
-        let validator = ChecksumValidator()
-        let match = (try? await validator.validate(fileURL: task.destinationURL, expectedChecksum: expectedChecksum)) ?? false
-        checksumMatchStatus = match
-        appendRepairLog("Checksum verification (\(selectedChecksumAlgorithm)): \(match ? "PASS" : "FAIL")")
-        return match
-    }
-
-    // MARK: - Campus Doctor Actions
-
-    public func runDiagnostics() async {
-        appendRepairLog("Running full network diagnostics scan...")
-        let report = await campusDoctor.runFullDiagnostics()
-        activeIssues = report.activeIssues
-        captivePortalStatus = report.captivePortalStatus
-
-        // Probe the 5 endpoints
-        for endpoint in Self.targetEndpoints {
-            let res = await campusDoctor.pingTarget(host: endpoint)
-            endpointRTTs[endpoint] = res
-        }
-        appendRepairLog("Diagnostics complete: \(activeIssues.count) issues detected")
-    }
-
-    public func manualFixMTU() async throws {
-        appendRepairLog("Applying manual MTU 1280 fix...")
-        try await campusDoctor.fixMTU(service: "Wi-Fi", mtu: 1280)
-        appendRepairLog("✓ MTU 1280 set on Wi-Fi")
-    }
-
-    public func manualFlushDNS() async throws {
-        appendRepairLog("Flushing DNS cache...")
-        try await campusDoctor.flushDNS()
-        appendRepairLog("✓ DNS flushed")
-    }
-
-    public func manualFlushARP() async throws {
-        appendRepairLog("Flushing ARP table...")
-        try await campusDoctor.flushARP()
-        appendRepairLog("✓ ARP table flushed")
-    }
-
-    public func manualDisableIPv6() async throws {
-        appendRepairLog("Disabling IPv6 on Wi-Fi...")
-        try await campusDoctor.disableIPv6(service: "Wi-Fi")
-        appendRepairLog("✓ IPv6 disabled")
-    }
-
-    public func manualResetDNS() async throws {
-        appendRepairLog("Resetting DNS to DHCP defaults...")
-        let repair = RepairRoutines()
-        try await repair.resetDNS(service: "Wi-Fi")
-        appendRepairLog("✓ DNS reset to DHCP defaults")
-    }
-
-    public func clearRepairLogs() {
-        repairLogs.removeAll()
-    }
-
-    public func appendRepairLog(_ entry: String) {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        let timestamp = formatter.string(from: Date())
-        repairLogs.append("[\(timestamp)] \(entry)")
-        if repairLogs.count > 200 {
-            repairLogs.removeFirst(repairLogs.count - 200)
-        }
-    }
-
-    // MARK: - AI Doctor Actions
-
-    public func sendChatMessage(text: String) async {
-        guard !text.isEmpty else { return }
-        chatMessages.append(ChatMessage(role: "user", content: text))
-        isAIAnalyzing = true
-
-        guard let bridge = llmBridge else {
-            chatMessages.append(ChatMessage(role: "assistant", content: "LLM Bridge is not configured."))
-            isAIAnalyzing = false
-            return
-        }
-
-        do {
-            let report = await campusDoctor.runFullDiagnostics()
-            let analysis = try await bridge.sendTelemetry(report: report, endpoint: lmStudioEndpoint)
-            latestAnalysis = analysis
-            chatMessages.append(ChatMessage(role: "assistant", content: analysis.diagnosis))
-            isLMStudioConnected = true
-        } catch {
-            isLMStudioConnected = false
-            chatMessages.append(ChatMessage(
-                role: "assistant",
-                content: "Unable to reach LM Studio at \(lmStudioEndpoint.absoluteString). Please ensure LM Studio local server is started on port 1234. Error: \(error.localizedDescription)"
-            ))
-        }
-
-        isAIAnalyzing = false
-    }
-
-    public func runDiagnosticsAndAnalyze() async {
-        isAIAnalyzing = true
-        appendRepairLog("Sending telemetry report to AI Doctor...")
-
-        guard let bridge = llmBridge else {
-            appendRepairLog("❌ LLM Bridge not available")
-            isAIAnalyzing = false
-            return
-        }
-
-        do {
-            let report = await campusDoctor.runFullDiagnostics()
-            let analysis = try await bridge.sendTelemetry(report: report, endpoint: lmStudioEndpoint)
-            latestAnalysis = analysis
-            isLMStudioConnected = true
-            appendRepairLog("AI Analysis received: \(analysis.diagnosis)")
-        } catch {
-            isLMStudioConnected = false
-            appendRepairLog("❌ AI Doctor offline: \(error.localizedDescription)")
-        }
-
-        isAIAnalyzing = false
-    }
-
-    nonisolated private static func runTool(
-        bridge: any LLMDoctorBridgeProtocol,
-        name: String,
-        arguments: [String: String]
-    ) async throws -> ToolResult {
-        let anyArgs: [String: Any] = arguments
-        return try await bridge.executeTool(name: name, arguments: anyArgs)
-    }
-
-    public func approveAndExecuteTool(name: String, arguments: [String: String]) async throws -> ToolResult {
-        guard let bridge = llmBridge else {
-            throw NSError(domain: "NetBoost", code: 404, userInfo: [NSLocalizedDescriptionKey: "LLM Bridge unavailable"])
-        }
-
-        appendRepairLog("🤖 Executing AI approved tool: \(name)")
-        let result = try await Self.runTool(bridge: bridge, name: name, arguments: arguments)
-
-        let argsString = arguments.map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
-        toolExecutionLogs.append(
-            ToolExecutionLog(
-                toolName: name,
-                arguments: argsString,
-                success: result.success,
-                output: result.output
-            )
-        )
-
-        appendRepairLog("Tool [\(name)] output: \(result.output)")
-        return result
-    }
-
-    // MARK: - Background Tasks Implementation
-
-    public func startBackgroundTasks() {
-        // 1. Throughput Polling (1 second) with EMA smoothing & hardware byte counters
-        throughputTimerTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                guard let self = self else { break }
-                await MainActor.run {
-                    let now = Date()
-                    let dt = max(0.2, now.timeIntervalSince(self.lastInterfaceSampleTime))
-                    self.lastInterfaceSampleTime = now
-
-                    let currentIface = self.primaryInterface.isEmpty ? nil : self.primaryInterface
-                    let counters = DarwinSocketHelper.getInterfaceBytes(for: currentIface)
-
-                    var instDown: Double = 0
-                    var instUp: Double = 0
-
-                    if self.lastTrackedInterface != currentIface {
-                        // Interface switched or reconnected; re-establish baseline
-                        self.lastTrackedInterface = currentIface
-                        self.lastInterfaceIn = counters.inputBytes
-                        self.lastInterfaceOut = counters.outputBytes
-                    } else if self.lastInterfaceIn > 0 {
-                        // Inbound 32-bit Darwin counter rollover math
-                        let deltaIn: UInt64
-                        if counters.inputBytes >= self.lastInterfaceIn {
-                            deltaIn = counters.inputBytes - self.lastInterfaceIn
-                        } else if self.lastInterfaceIn <= UInt64(UInt32.max) {
-                            deltaIn = (UInt64(UInt32.max) - self.lastInterfaceIn + 1) + counters.inputBytes
-                        } else {
-                            deltaIn = 0
-                        }
-
-                        // Outbound 32-bit Darwin counter rollover math
-                        let deltaOut: UInt64
-                        if counters.outputBytes >= self.lastInterfaceOut {
-                            deltaOut = counters.outputBytes - self.lastInterfaceOut
-                        } else if self.lastInterfaceOut <= UInt64(UInt32.max) {
-                            deltaOut = (UInt64(UInt32.max) - self.lastInterfaceOut + 1) + counters.outputBytes
-                        } else {
-                            deltaOut = 0
-                        }
-
-                        // Protect against unreasonable spikes (> 10 GB/s on interface flap)
-                        instDown = (deltaIn < 10_000_000_000) ? (Double(deltaIn) / dt) : 0
-                        instUp = (deltaOut < 10_000_000_000) ? (Double(deltaOut) / dt) : 0
-                    }
-
-                    self.lastInterfaceIn = counters.inputBytes
-                    self.lastInterfaceOut = counters.outputBytes
-
-                    self.updateSpeeds(download: instDown, upload: instUp)
-                }
-            }
-        }
-
-        // 2. RTT Probe Loop (2 seconds) across 5 endpoints
-        rttTimerTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                guard let self = self else { break }
-                for endpoint in Self.targetEndpoints {
-                    let result = await self.campusDoctor.pingTarget(host: endpoint)
-                    await MainActor.run {
-                        self.endpointRTTs[endpoint] = result
-                    }
-                }
-            }
-        }
-
-        // 3. Clipboard URL Watcher Stream
-        clipboardStreamTask = Task { [weak self] in
-            guard let self = self else { return }
-            for await url in self.pasteboardWatcher.detectedURLs {
-                if Task.isCancelled { break }
-                await MainActor.run {
-                    self.detectedClipboardURL = url
-                    self.appendRepairLog("📋 Clipboard detected download URL: \(url.absoluteString)")
-                }
-            }
-        }
-
-        // 4. Download Task Info Stream
-        downloadStreamTask = Task { [weak self] in
-            guard let self = self else { return }
-            for await task in self.downloadManager.taskPublisher {
-                if Task.isCancelled { break }
-                await MainActor.run {
-                    self.activeDownloadTask = task
-                }
-            }
-        }
-    }
-
-    public func stopBackgroundTasks() {
-        throughputTimerTask?.cancel()
-        throughputTimerTask = nil
-        rttTimerTask?.cancel()
-        rttTimerTask = nil
-        clipboardStreamTask?.cancel()
-        clipboardStreamTask = nil
-        downloadStreamTask?.cancel()
-        downloadStreamTask = nil
+        let targetDownstream = downstreamInterface
+        let externalWiFi = await Task.detached(priority: .utility) {
+            Self.checkExternalWiFiConnected(downstream: targetDownstream)
+        }.value
+        isWiFiConnectedToExternalNetwork = externalWiFi
     }
 }

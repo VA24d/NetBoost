@@ -55,10 +55,16 @@ public final class MTUManager: Sendable {
         _ = try Self.validateAndGenerateMTUCommand(service: service, mtu: mtu)
 
         let cmd = MTUInspector.makeSetMTUCommand(service: service, mtu: mtu)
-        if PrivilegeHelper.isRoot {
-            _ = try await ShellCommand.run(cmd[0], arguments: Array(cmd.dropFirst()))
-        } else {
-            _ = try await PrivilegeHelper.runElevated(script: cmd[0], arguments: Array(cmd.dropFirst()))
+        let fallbackScript = cmd.map(ShellCommand.shellQuote).joined(separator: " ")
+        let output = try await PrivilegeHelper.executeDaemonOrElevated(
+            rootExecutable: cmd[0],
+            rootArguments: Array(cmd.dropFirst()),
+            daemonAction: .setMTU,
+            daemonArguments: [service, String(mtu)],
+            fallbackScript: fallbackScript
+        )
+        if PrivilegeHelper.isRoot && !output.succeeded {
+            throw ShellError.executionFailed(exitCode: output.exitCode, stdout: output.stdout, stderr: output.stderr)
         }
     }
 

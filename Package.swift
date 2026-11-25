@@ -8,7 +8,8 @@ let package = Package(
     ],
     products: [
         .library(name: "NetBoostCore", targets: ["NetBoostCore"]),
-        .executable(name: "NetBoostApp", targets: ["NetBoostApp"])
+        .executable(name: "NetBoostApp", targets: ["NetBoostApp"]),
+        .executable(name: "NetBoostHelper", targets: ["NetBoostHelper"])
     ],
     dependencies: [],
     targets: [
@@ -21,6 +22,11 @@ let package = Package(
             name: "NetBoostApp",
             dependencies: ["NetBoostCore"],
             path: "Sources/NetBoostApp"
+        ),
+        .executableTarget(
+            name: "NetBoostHelper",
+            dependencies: ["NetBoostCore"],
+            path: "Sources/NetBoostHelper"
         ),
         .testTarget(
             name: "NetBoostTests",

@@ -5,11 +5,17 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (without leading v)'
+        required: false
+        default: '1.0.0'
+        type: string
 
 jobs:
   build-release:
     name: Build & Package DMG Release
-    runs-on: macos-14
+    runs-on: macos-15
     permissions:
       contents: write
 
@@ -17,17 +23,58 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer || true
+      - name: Select Xcode 16
+        run: |
+          XCODE_APP="$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [ -n "$XCODE_APP" ] && [ -d "$XCODE_APP/Contents/Developer" ]; then
+            echo "Selecting $XCODE_APP"
+            sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          else
+            echo "Using default developer directory: $(xcode-select -p)"
+          fi
+
+      - name: Verify Swift Toolchain
+        run: |
+          xcode-select -p
+          swift --version
+
+      - name: Determine Release Version
+        id: meta
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${INPUT_VERSION:-1.0.0}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "dmg_path=NetBoost-${VERSION}.dmg" >> "$GITHUB_OUTPUT"
 
       - name: Build & Package DMG
-        run: ./Scripts/package_dmg.sh
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          DMG_PATH: ${{ steps.meta.outputs.dmg_path }}
+        run: |
+          ./Scripts/package_dmg.sh --version "$RELEASE_VERSION"
+          if [ ! -s "$DMG_PATH" ]; then
+            echo "::error::Expected DMG artifact missing or empty: $DMG_PATH"
+            exit 1
+          fi
+          ls -lh "$DMG_PATH"
+
+      - name: Upload DMG Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetBoost-${{ steps.meta.outputs.version }}-dmg
+          path: ${{ steps.meta.outputs.dmg_path }}
+          if-no-files-found: error
 
       - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            NetBoost-*.dmg
+          files: ${{ steps.meta.outputs.dmg_path }}
           generate_release_notes: true
           draft: false
           prerelease: false

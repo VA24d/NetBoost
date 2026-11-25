@@ -235,4 +235,30 @@ struct DownloadManagerTests {
         #expect(collectedStatuses.contains(.downloading))
         #expect(collectedStatuses.contains(.completed))
     }
+
+    @Test("Completed chunks zero their speed to prevent completed-chunk speed inflation")
+    func testCompletedChunksZeroSpeedMetrics() async throws {
+        let payloadSize = 1_048_576 // 1 MB -> 8 chunks
+        let payload = TestAssertions.generateDeterministicPayload(size: payloadSize)
+        let server = MockHTTPServer(payload: payload)
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let targetURL = URL(string: "http://127.0.0.1:\(port)/metrics.bin")!
+        let destURL = makeTemporaryFileURL(name: "metrics.bin")
+        defer { try? FileManager.default.removeItem(at: destURL) }
+
+        let manager = DownloadManager()
+        let finalTask = try await manager.downloadAndWait(
+            url: targetURL,
+            destination: destURL,
+            chunksCount: 8,
+            timeout: 10.0
+        )
+
+        #expect(finalTask.status == .completed)
+        #expect(finalTask.speedBytesPerSec == 0.0)
+        #expect(finalTask.chunks.count == 8)
+        #expect(finalTask.chunks.allSatisfy { $0.status == .completed && $0.speedBytesPerSec == 0.0 })
+    }
 }

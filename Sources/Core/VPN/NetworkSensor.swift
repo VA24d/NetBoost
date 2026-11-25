@@ -109,7 +109,7 @@ public final class LiveNWPathMonitor: PathMonitorProtocol, @unchecked Sendable {
     }
 }
 
-/// System interface provider using Darwin getifaddrs to inspect active physical network interfaces.
+/// System interface provider using Darwin getifaddrs, ioctl, and routing table queries to inspect physical network interfaces.
 public final class SystemInterfaceProvider: NetworkInterfaceProvider, @unchecked Sendable {
     public init() {}
 
@@ -119,11 +119,16 @@ public final class SystemInterfaceProvider: NetworkInterfaceProvider, @unchecked
         defer { freeifaddrs(ifaddr) }
 
         var interfacesDict: [String: [IPAddress]] = [:]
+        var isUpDict: [String: Bool] = [:]
+        var orderedNames: [String] = []
         var ptr: UnsafeMutablePointer<ifaddrs>? = firstAddr
 
         while let current = ptr {
             let interface = current.pointee
             let name = String(cString: interface.ifa_name)
+            let flags = Int32(interface.ifa_flags)
+            let entryIsUp = (flags & IFF_UP) != 0 && (flags & IFF_RUNNING) != 0
+            isUpDict[name] = (isUpDict[name] ?? false) || entryIsUp
 
             if let addr = interface.ifa_addr {
                 let family = addr.pointee.sa_family
@@ -138,6 +143,9 @@ public final class SystemInterfaceProvider: NetworkInterfaceProvider, @unchecked
                                 netmaskStr = maskBuffer.withUnsafeBufferPointer { ptr in ptr.baseAddress.map { String(cString: $0) } }
                             }
                         }
+                        if interfacesDict[name] == nil {
+                            orderedNames.append(name)
+                        }
                         interfacesDict[name, default: []].append(IPAddress(address: ip, version: .v4, netmask: netmaskStr))
                     }
                 }
@@ -145,15 +153,25 @@ public final class SystemInterfaceProvider: NetworkInterfaceProvider, @unchecked
             ptr = interface.ifa_next
         }
 
-        return interfacesDict.map { (name, ips) in
-            NetworkInterfaceInfo(
+        let gateways = DarwinSocketHelper.getDefaultGateways()
+
+        return orderedNames.compactMap { name in
+            guard let ips = interfacesDict[name] else { return nil }
+            let mac = DarwinSocketHelper.getInterfaceMACAddress(name)
+            let realMTU = DarwinSocketHelper.getInterfaceMTU(name)
+            let fallbackMTU = (name == "en9" || ips.first?.address.hasPrefix("172.20.10.") == true) ? 1280 : 1500
+            let gateway = gateways[name]
+            let isUp = isUpDict[name] ?? false
+
+            return NetworkInterfaceInfo(
                 bsdName: name,
                 displayName: name,
                 ipAddresses: ips,
-                gateway: name == "en10" ? "10.1.36.1" : (name == "en9" || ips.first?.address.hasPrefix("172.20.10.") == true ? "172.20.10.1" : "192.168.1.1"),
-                mtu: (name == "en9" || ips.first?.address.hasPrefix("172.20.10.") == true) ? 1280 : 1500,
-                isPrimary: name == "en10" || name == "en0",
-                isUp: true
+                macAddress: mac,
+                gateway: gateway,
+                mtu: realMTU ?? fallbackMTU,
+                isPrimary: gateway != nil,
+                isUp: isUp
             )
         }
     }
@@ -188,6 +206,32 @@ public final class NetworkSensor: @unchecked Sendable {
         self.state = initialState
     }
 
+    private static func primaryValidIPv4(for iface: NetworkInterfaceInfo) -> String? {
+        iface.ipAddresses.first { addr in
+            guard addr.version == .v4, !addr.address.isEmpty else { return false }
+            let ip = addr.address
+            guard !ip.hasPrefix("169.254.") && !ip.hasPrefix("127.") else { return false }
+            // Ignore hotspot NAT gateway alias on en0 so offline hotspot isn't treated as external Wi-Fi
+            if iface.bsdName == "en0" && ip == "192.168.2.1" {
+                return false
+            }
+            return true
+        }?.address
+    }
+
+    private static func classifyGenericInterface(
+        _ iface: NetworkInterfaceInfo,
+        ip: String
+    ) -> NetworkEnvironmentState {
+        if ip.hasPrefix("10.1.") || ip.hasPrefix("10.8.") {
+            return .campusLAN(interface: iface.bsdName, ip: ip, gateway: iface.gateway ?? "10.1.36.1", mtu: iface.mtu)
+        } else if ip.hasPrefix("172.20.10.") {
+            return .cellularHotspot(interface: iface.bsdName, ip: ip, gateway: iface.gateway ?? "172.20.10.1", mtu: 1280)
+        } else {
+            return .externalWiFi(interface: iface.bsdName, ip: ip, gateway: iface.gateway ?? "192.168.1.1", mtu: iface.mtu)
+        }
+    }
+
     /// Pure, deterministic classification function evaluating network environment state.
     public static func classify(
         interfaces: [NetworkInterfaceInfo],
@@ -198,8 +242,8 @@ public final class NetworkSensor: @unchecked Sendable {
         }
 
         let validInterfaces = interfaces.filter { iface in
-            guard iface.isUp, let ip = iface.ipv4Address else { return false }
-            return !ip.hasPrefix("169.254.") && !ip.hasPrefix("127.") && !ip.isEmpty
+            guard iface.isUp, iface.bsdName != "bridge100" else { return false }
+            return primaryValidIPv4(for: iface) != nil
         }
 
         guard !validInterfaces.isEmpty else {
@@ -207,51 +251,38 @@ public final class NetworkSensor: @unchecked Sendable {
         }
 
         // 1. Dual-homed priority: Check Wired Ethernet (en10) on Campus LAN (10.1.0.0/16 or 10.8.0.0/16)
-        if let en10 = validInterfaces.first(where: { $0.bsdName == "en10" }) {
-            if let ip = en10.ipv4Address, (ip.hasPrefix("10.1.") || ip.hasPrefix("10.8.")) {
-                return .campusLAN(interface: "en10", ip: ip, gateway: en10.gateway ?? "10.1.36.1", mtu: en10.mtu)
-            }
+        if let en10 = validInterfaces.first(where: { $0.bsdName == "en10" }),
+           let ip = primaryValidIPv4(for: en10),
+           (ip.hasPrefix("10.1.") || ip.hasPrefix("10.8.")) {
+            return .campusLAN(interface: "en10", ip: ip, gateway: en10.gateway ?? "10.1.36.1", mtu: en10.mtu)
         }
 
         // 2. Cellular tethering via iPhone USB (en9)
         if let en9 = validInterfaces.first(where: { $0.bsdName == "en9" }) {
-            let ip = en9.ipv4Address ?? "172.20.10.2"
+            let ip = primaryValidIPv4(for: en9) ?? "172.20.10.2"
             return .cellularHotspot(interface: "en9", ip: ip, gateway: en9.gateway ?? "172.20.10.1", mtu: 1280)
         }
 
         // 3. Wi-Fi (en0)
-        if let en0 = validInterfaces.first(where: { $0.bsdName == "en0" }) {
-            if let ip = en0.ipv4Address {
-                if ip.hasPrefix("172.20.10.") || (path?.isExpensive == true && ip.hasPrefix("172.")) {
-                    return .cellularHotspot(interface: "en0", ip: ip, gateway: en0.gateway ?? "172.20.10.1", mtu: 1280)
-                } else {
-                    return .externalWiFi(interface: "en0", ip: ip, gateway: en0.gateway ?? "192.168.1.1", mtu: en0.mtu)
-                }
+        if let en0 = validInterfaces.first(where: { $0.bsdName == "en0" }),
+           let ip = primaryValidIPv4(for: en0) {
+            if ip.hasPrefix("172.20.10.") || (path?.isExpensive == true && ip.hasPrefix("172.")) {
+                return .cellularHotspot(interface: "en0", ip: ip, gateway: en0.gateway ?? "172.20.10.1", mtu: 1280)
+            } else {
+                return .externalWiFi(interface: "en0", ip: ip, gateway: en0.gateway ?? "192.168.1.1", mtu: en0.mtu)
             }
         }
 
         // 4. Any other primary interface
-        if let primary = validInterfaces.first(where: { $0.isPrimary }) {
-            if let ip = primary.ipv4Address {
-                if ip.hasPrefix("10.1.") || ip.hasPrefix("10.8.") {
-                    return .campusLAN(interface: primary.bsdName, ip: ip, gateway: primary.gateway ?? "10.1.36.1", mtu: primary.mtu)
-                } else if ip.hasPrefix("172.20.10.") {
-                    return .cellularHotspot(interface: primary.bsdName, ip: ip, gateway: primary.gateway ?? "172.20.10.1", mtu: 1280)
-                } else {
-                    return .externalWiFi(interface: primary.bsdName, ip: ip, gateway: primary.gateway ?? "192.168.1.1", mtu: primary.mtu)
-                }
-            }
+        if let primary = validInterfaces.first(where: { $0.isPrimary }),
+           let ip = primaryValidIPv4(for: primary) {
+            return classifyGenericInterface(primary, ip: ip)
         }
 
         // 5. First remaining active interface
-        if let first = validInterfaces.first, let ip = first.ipv4Address {
-            if ip.hasPrefix("10.1.") || ip.hasPrefix("10.8.") {
-                return .campusLAN(interface: first.bsdName, ip: ip, gateway: first.gateway ?? "10.1.36.1", mtu: first.mtu)
-            } else if ip.hasPrefix("172.20.10.") {
-                return .cellularHotspot(interface: first.bsdName, ip: ip, gateway: first.gateway ?? "172.20.10.1", mtu: 1280)
-            } else {
-                return .externalWiFi(interface: first.bsdName, ip: ip, gateway: first.gateway ?? "192.168.1.1", mtu: first.mtu)
-            }
+        if let first = validInterfaces.first,
+           let ip = primaryValidIPv4(for: first) {
+            return classifyGenericInterface(first, ip: ip)
         }
 
         return .disconnected

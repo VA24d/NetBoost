@@ -102,4 +102,28 @@ struct RoutePinningTests {
         // Every macOS machine has active routing entries (at least default or loopback)
         #expect(!routes.isEmpty)
     }
+
+    @Test("Strict IPv4, CIDR, and interface validation rejects injection inputs")
+    func testInputValidationRejectsInjection() async {
+        #expect(RoutePinningEngine.validateIPv4("10.1.36.1") == true)
+        #expect(RoutePinningEngine.validateIPv4("10.1.36.1; rm -rf /") == false)
+        #expect(RoutePinningEngine.validateIPv4("10..36.1") == false)
+        #expect(RoutePinningEngine.validateInterface("en10") == true)
+        #expect(RoutePinningEngine.validateInterface("en10; whoami") == false)
+        #expect(RoutePinningEngine.validateInterface("") == false)
+
+        let engine = RoutePinningEngine()
+
+        let badSubnet = await engine.pinSubnet(subnet: "10.8.0.0; echo injected")
+        #expect(badSubnet.success == false)
+        #expect(badSubnet.manualCommand == nil)
+
+        let badGateway = await engine.pinSubnet(subnet: "10.8.0.0/16", gateway: "10.1.36.1 && id")
+        #expect(badGateway.success == false)
+        #expect(badGateway.manualCommand == nil)
+
+        let badInterface = await engine.pinSubnet(subnet: "10.8.0.0/16", gateway: "10.1.36.1", interface: "en10`id`")
+        #expect(badInterface.success == false)
+        #expect(badInterface.manualCommand == nil)
+    }
 }

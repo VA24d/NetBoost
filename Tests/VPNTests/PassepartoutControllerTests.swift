@@ -144,6 +144,41 @@ struct PassepartoutControllerTests {
         #expect(resolved == "macos.ovpn")
     }
 
+    @Test("Resolve profile name maps 'macos.vpn' to 'macos.ovpn' when present in scutil list and falls back cleanly")
+    func testProfileNameResolutionMacosVpn() async {
+        let listWithOvpn = """
+        * (Disconnected) 09C7C32A-1DF8-4783-953E-E22F5972C95B VPN (com.algoritmico.ios.Passepartout) "macos.ovpn"
+        """
+        let runnerWithOvpn = MockCommandRunner { _, args in
+            if args.contains("list") {
+                return ShellOutput(stdout: listWithOvpn, stderr: "", exitCode: 0)
+            }
+            return ShellOutput(stdout: "Disconnected", stderr: "", exitCode: 0)
+        }
+        let controllerWithOvpn = PassepartoutController(runner: runnerWithOvpn)
+        #expect(await controllerWithOvpn.resolveProfileName("macos.vpn") == "macos.ovpn")
+
+        // Fallback when list fails
+        let failingRunner = MockCommandRunner { _, _ in
+            ShellOutput(stdout: "", stderr: "error", exitCode: 1)
+        }
+        let controllerFallback = PassepartoutController(runner: failingRunner)
+        #expect(await controllerFallback.resolveProfileName("macos.vpn") == "macos.ovpn")
+
+        // Preserves literal "macos.vpn" if only "macos.vpn" exists in scutil list
+        let listWithLiteralVpn = """
+        * (Disconnected) 09C7C32A-1DF8-4783-953E-E22F5972C95B VPN (com.algoritmico.ios.Passepartout) "macos.vpn"
+        """
+        let runnerWithVpn = MockCommandRunner { _, args in
+            if args.contains("list") {
+                return ShellOutput(stdout: listWithLiteralVpn, stderr: "", exitCode: 0)
+            }
+            return ShellOutput(stdout: "Disconnected", stderr: "", exitCode: 0)
+        }
+        let controllerWithVpn = PassepartoutController(runner: runnerWithVpn)
+        #expect(await controllerWithVpn.resolveProfileName("macos.vpn") == "macos.vpn")
+    }
+
     @Test("Command failure throws VPNControllerError.commandFailed")
     func testCommandFailureThrows() async {
         let mockRunner = MockCommandRunner { exe, args in

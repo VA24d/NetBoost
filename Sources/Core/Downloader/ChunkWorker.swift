@@ -16,6 +16,10 @@ public final class ChunkWorker: @unchecked Sendable {
     public let maxRetries: Int
     public var onProgress: (@Sendable (Int, Int64, Double) -> Void)?
 
+    private static let streamBlockSize: Int = 65_536
+    private static let progressIntervalSec: TimeInterval = 0.1
+    private static let progressByteThreshold: Int64 = 262_144
+
     public init(
         chunk: DownloadChunkInfo,
         url: URL,
@@ -46,7 +50,7 @@ public final class ChunkWorker: @unchecked Sendable {
         return "bytes=\(nextByte)-\(chunk.rangeEnd)"
     }
 
-    /// Concurrently downloads the assigned byte slice directly to disk with exponential retry.
+    /// Concurrently streams the assigned byte slice directly to disk with incremental writes and exponential retry.
     public func download() async throws -> DownloadChunkInfo {
         var currentChunk = chunk
         var attempt = 0
@@ -65,27 +69,31 @@ public final class ChunkWorker: @unchecked Sendable {
                 return currentChunk
             }
 
+            let expectedRequestBytes = endByte - startByte + 1
+
             var request = URLRequest(url: url)
             request.setValue("bytes=\(startByte)-\(endByte)", forHTTPHeaderField: "Range")
-            request.timeoutInterval = 10.0
+            request.timeoutInterval = 15.0
 
-            let startTime = Date()
             do {
                 currentChunk.status = .downloading
 
-                let (data, response) = try await session.data(for: request)
+                let (asyncBytes, response) = try await session.bytes(for: request)
                 guard let httpResponse = response as? HTTPURLResponse else {
+                    asyncBytes.task.cancel()
                     throw ChunkWorkerError.networkError("Invalid response type from server")
                 }
 
                 // Check for terminal 416 Range Not Satisfiable
                 if httpResponse.statusCode == 416 {
+                    asyncBytes.task.cancel()
                     currentChunk.status = .failed
                     throw ChunkWorkerError.rangeNotSatisfiable
                 }
 
                 // Check for rate limiting 429
                 if httpResponse.statusCode == 429 {
+                    asyncBytes.task.cancel()
                     let retryAfter = httpResponse.value(forHTTPHeaderField: "Retry-After")
                     let backoff = Self.calculateBackoff(retryAfterHeader: retryAfter, attempt: attempt)
                     try await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
@@ -93,7 +101,21 @@ public final class ChunkWorker: @unchecked Sendable {
                     continue
                 }
 
-                guard httpResponse.statusCode == 200 || httpResponse.statusCode == 206 else {
+                if httpResponse.statusCode == 200 {
+                    // Reject 200 OK when requesting a non-zero offset (server ignored Range and sent byte 0)
+                    guard startByte == 0 else {
+                        asyncBytes.task.cancel()
+                        currentChunk.status = .failed
+                        throw ChunkWorkerError.serverError(statusCode: 200)
+                    }
+                    // Also reject 200 OK if full response size does not match the chunk size
+                    if httpResponse.expectedContentLength > 0 && httpResponse.expectedContentLength != expectedRequestBytes {
+                        asyncBytes.task.cancel()
+                        currentChunk.status = .failed
+                        throw ChunkWorkerError.serverError(statusCode: 200)
+                    }
+                } else if httpResponse.statusCode != 206 {
+                    asyncBytes.task.cancel()
                     if httpResponse.statusCode >= 500 && attempt < maxRetries {
                         let backoff = Self.calculateBackoff(retryAfterHeader: nil, attempt: attempt)
                         try await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
@@ -104,19 +126,86 @@ public final class ChunkWorker: @unchecked Sendable {
                     throw ChunkWorkerError.serverError(statusCode: httpResponse.statusCode)
                 }
 
-                // Zero-copy direct write into pre-allocated file at start offset
-                try assembler.write(data: data, at: startByte)
+                var blockBuffer: [UInt8] = []
+                blockBuffer.reserveCapacity(Self.streamBlockSize)
+                var writeOffset = startByte
+                var receivedThisAttempt: Int64 = 0
+                var bytesSinceProgress: Int64 = 0
+                var lastProgressTime = Date()
+                var smoothedSpeed = currentChunk.speedBytesPerSec
 
-                let duration = max(0.001, Date().timeIntervalSince(startTime))
-                let speed = Double(data.count) / duration
+                for try await byte in asyncBytes {
+                    if Task.isCancelled {
+                        asyncBytes.task.cancel()
+                        currentChunk.status = .pending
+                        throw CancellationError()
+                    }
 
-                currentChunk.downloadedBytes += Int64(data.count)
-                currentChunk.speedBytesPerSec = speed
-                onProgress?(currentChunk.id, currentChunk.downloadedBytes, speed)
+                    if receivedThisAttempt >= expectedRequestBytes {
+                        asyncBytes.task.cancel()
+                        if httpResponse.statusCode == 200 {
+                            currentChunk.status = .failed
+                            throw ChunkWorkerError.serverError(statusCode: 200)
+                        }
+                        break
+                    }
+
+                    blockBuffer.append(byte)
+                    receivedThisAttempt += 1
+
+                    if blockBuffer.count >= Self.streamBlockSize {
+                        let data = Data(blockBuffer)
+                        try assembler.write(data: data, at: writeOffset)
+                        let writtenCount = Int64(data.count)
+                        writeOffset += writtenCount
+                        currentChunk.downloadedBytes += writtenCount
+                        bytesSinceProgress += writtenCount
+                        blockBuffer.removeAll(keepingCapacity: true)
+
+                        let now = Date()
+                        let dt = now.timeIntervalSince(lastProgressTime)
+                        if dt >= Self.progressIntervalSec || bytesSinceProgress >= Self.progressByteThreshold {
+                            let instSpeed = Double(bytesSinceProgress) / max(0.001, dt)
+                            smoothedSpeed = smoothedSpeed > 0 ? (0.2 * instSpeed + 0.8 * smoothedSpeed) : instSpeed
+                            currentChunk.speedBytesPerSec = smoothedSpeed
+                            onProgress?(currentChunk.id, currentChunk.downloadedBytes, smoothedSpeed)
+                            lastProgressTime = now
+                            bytesSinceProgress = 0
+                        }
+                    }
+                }
+
+                if !blockBuffer.isEmpty {
+                    let data = Data(blockBuffer)
+                    try assembler.write(data: data, at: writeOffset)
+                    let writtenCount = Int64(data.count)
+                    writeOffset += writtenCount
+                    currentChunk.downloadedBytes += writtenCount
+                    bytesSinceProgress += writtenCount
+                    blockBuffer.removeAll()
+                }
+
+                if bytesSinceProgress > 0 {
+                    let dt = max(0.001, Date().timeIntervalSince(lastProgressTime))
+                    let instSpeed = Double(bytesSinceProgress) / dt
+                    smoothedSpeed = smoothedSpeed > 0 ? (0.2 * instSpeed + 0.8 * smoothedSpeed) : instSpeed
+                    currentChunk.speedBytesPerSec = smoothedSpeed
+                    onProgress?(currentChunk.id, currentChunk.downloadedBytes, smoothedSpeed)
+                }
 
                 if currentChunk.downloadedBytes >= currentChunk.totalBytes {
                     currentChunk.status = .completed
                     return currentChunk
+                }
+
+                // Stream ended before chunk completed
+                if attempt < maxRetries {
+                    let backoff = Self.calculateBackoff(retryAfterHeader: nil, attempt: attempt)
+                    try await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
+                    attempt += 1
+                } else {
+                    currentChunk.status = .failed
+                    throw ChunkWorkerError.networkError("Incomplete stream: received \(currentChunk.downloadedBytes) of \(currentChunk.totalBytes) bytes")
                 }
             } catch is CancellationError {
                 currentChunk.status = .pending
@@ -127,9 +216,17 @@ public final class ChunkWorker: @unchecked Sendable {
                     throw CancellationError()
                 }
 
-                if let workerErr = error as? ChunkWorkerError, workerErr == .rangeNotSatisfiable {
-                    currentChunk.status = .failed
-                    throw workerErr
+                if let workerErr = error as? ChunkWorkerError {
+                    switch workerErr {
+                    case .rangeNotSatisfiable, .serverError:
+                        currentChunk.status = .failed
+                        throw workerErr
+                    case .cancelled:
+                        currentChunk.status = .pending
+                        throw CancellationError()
+                    case .rateLimited, .networkError:
+                        break
+                    }
                 }
 
                 if attempt < maxRetries {

@@ -125,6 +125,7 @@ public final class VPNRuleEngine: @unchecked Sendable {
             var lastError: Error?
 
             while attempt < policy.maxRetries && !success {
+                try Task.checkCancellation()
                 attempt += 1
                 do {
                     try await vpnController.connect(profileName: profile)
@@ -136,7 +137,7 @@ public final class VPNRuleEngine: @unchecked Sendable {
                         break
                     }
                     let delay = policy.baseBackoffDelay * pow(2.0, Double(attempt - 1))
-                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 }
             }
 
@@ -154,21 +155,38 @@ public final class VPNRuleEngine: @unchecked Sendable {
 
     /// Starts observing a NetworkSensor's environment stream to trigger automated actions.
     public func startObserving(sensor: NetworkSensor, activeProfile: VPNProfileInfo? = nil) {
-        observationTask?.cancel()
-        observationTask = Task { [weak self] in
+        let task = Task { [weak self] in
             guard let self = self else { return }
             for await env in sensor.makeEnvironmentStream() {
                 guard !Task.isCancelled else { break }
                 let action = self.evaluate(state: env, activeProfile: activeProfile)
-                try? await self.execute(action: action, state: env)
+                do {
+                    try await self.execute(action: action, state: env)
+                } catch is CancellationError {
+                    break
+                } catch {
+                    self.lock.withLock {
+                        self.transitionNotifications.append("VPN action failed: \(error.localizedDescription)")
+                    }
+                }
             }
         }
+        let previous = lock.withLock { () -> Task<Void, Never>? in
+            let prev = observationTask
+            observationTask = task
+            return prev
+        }
+        previous?.cancel()
     }
 
     /// Stops observing the network sensor.
     public func stopObserving() {
-        observationTask?.cancel()
-        observationTask = nil
+        let task = lock.withLock { () -> Task<Void, Never>? in
+            let prev = observationTask
+            observationTask = nil
+            return prev
+        }
+        task?.cancel()
     }
 
     private func broadcast(event: VPNRuleEvent) {

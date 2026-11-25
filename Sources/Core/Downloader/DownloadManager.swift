@@ -88,7 +88,6 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
         }
         continuation?.yield(initialTask)
 
-        // Step 1: Capability Probe
         let probeResult: RangeProbeResult
         do {
             probeResult = try await rangeProbe.probe(url: url)
@@ -97,6 +96,7 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
             failedTask.status = .failed
             lock.withLock {
                 tasks[taskId] = failedTask
+                assemblers.removeValue(forKey: taskId)
             }
             continuation?.yield(failedTask)
             throw error
@@ -106,10 +106,8 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
         let targetChunks = chunksCount > 0 ? chunksCount : probeResult.suggestedChunkCount
         let effectiveChunks = probeResult.supportsRanges ? targetChunks : 1
 
-        // Step 2: Dynamic Chunk Partitioning
         let chunkInfos = ChunkPartitionEngine.partition(totalBytes: totalBytes, desiredChunks: effectiveChunks)
 
-        // Step 3: Destination Path Resolution
         let finalDestinationURL: URL
         var isDir: ObjCBool = false
         if FileManager.default.fileExists(atPath: destination.path, isDirectory: &isDir), isDir.boolValue {
@@ -118,15 +116,16 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
             finalDestinationURL = destination
         }
 
-        // Step 4: Destination File Pre-allocation via DiskAssembler
         let assembler = DiskAssembler()
         do {
             try assembler.prepare(fileURL: finalDestinationURL, totalBytes: totalBytes)
         } catch {
+            try? assembler.close()
             var failedTask = initialTask
             failedTask.status = .failed
             lock.withLock {
                 tasks[taskId] = failedTask
+                assemblers.removeValue(forKey: taskId)
             }
             continuation?.yield(failedTask)
             throw error
@@ -149,7 +148,6 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
         }
         continuation?.yield(activeTask)
 
-        // Step 5: Launch concurrent worker streaming pipeline
         startPipeline(for: taskId)
 
         return activeTask
@@ -239,6 +237,7 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
             for i in 0..<task.chunks.count {
                 if task.chunks[i].status == .downloading {
                     task.chunks[i].status = .pending
+                    task.chunks[i].speedBytesPerSec = 0
                 }
             }
             tasks[id] = task
@@ -254,9 +253,9 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
     }
 
     public func resumeDownload(id: UUID) async throws {
-        let shouldResume = lock.withLock { () -> Bool in
-            guard var task = tasks[id] else { return false }
-            guard task.status == .paused || task.status == .failed else { return false }
+        let (shouldResume, needsPrepare, taskSnapshot) = lock.withLock { () -> (Bool, Bool, DownloadTaskInfo?) in
+            guard var task = tasks[id] else { return (false, false, nil) }
+            guard task.status == .paused || task.status == .failed else { return (false, false, nil) }
 
             task.status = .downloading
             for i in 0..<task.chunks.count {
@@ -265,20 +264,32 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
                 }
             }
             tasks[id] = task
+            return (true, assemblers[id] == nil, task)
+        }
 
-            if assemblers[id] == nil {
-                let assembler = DiskAssembler()
-                try? assembler.prepare(fileURL: task.destinationURL, totalBytes: task.totalBytes)
-                assemblers[id] = assembler
+        guard shouldResume, let task = taskSnapshot else { return }
+
+        if needsPrepare {
+            let assembler = DiskAssembler()
+            do {
+                try assembler.prepare(fileURL: task.destinationURL, totalBytes: task.totalBytes)
+                lock.withLock {
+                    assemblers[id] = assembler
+                }
+            } catch {
+                try? assembler.close()
+                var failedTask = task
+                failedTask.status = .failed
+                lock.withLock {
+                    tasks[id] = failedTask
+                    assemblers.removeValue(forKey: id)
+                }
+                continuation?.yield(failedTask)
+                throw error
             }
-            return true
         }
 
-        guard shouldResume else { return }
-
-        if let task = getTask(id: id) {
-            continuation?.yield(task)
-        }
+        continuation?.yield(task)
         startPipeline(for: id)
     }
 
@@ -324,7 +335,12 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
 
         guard let task = taskOpt, let assembler = assemblerOpt else { return }
 
-        // If totalBytes == 0, mark complete immediately
+        defer {
+            _ = lock.withLock {
+                downloadTasks.removeValue(forKey: taskId)
+            }
+        }
+
         if task.totalBytes == 0 {
             try? assembler.flush()
             try? assembler.close()
@@ -376,13 +392,12 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
             }
             guard !isInterrupted else { return }
 
-            // Flush & Close Assembler
             try assembler.flush()
             try assembler.close()
 
-            // Verification Phase
             var currentTask = lock.withLock { self.tasks[taskId] } ?? task
             currentTask.status = .verifying
+            currentTask.speedBytesPerSec = 0
             lock.withLock {
                 tasks[taskId] = currentTask
             }
@@ -414,7 +429,6 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
                 }
             }
 
-            // Completion
             currentTask.status = .completed
             currentTask.downloadedBytes = currentTask.totalBytes
             currentTask.speedBytesPerSec = 0
@@ -426,8 +440,8 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
             continuation?.yield(currentTask)
             notifyContinuations(taskId: taskId, result: .success(currentTask))
         } catch is CancellationError {
-            // Cancellation or pause handled by pauseDownload / cancelDownload
         } catch {
+            try? assembler.close()
             var failedTask = lock.withLock { self.tasks[taskId] } ?? task
             failedTask.status = .failed
             failedTask.speedBytesPerSec = 0
@@ -449,25 +463,34 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
 
             if let idx = task.chunks.firstIndex(where: { $0.id == chunkId }) {
                 task.chunks[idx].downloadedBytes = downloadedBytes
-                task.chunks[idx].speedBytesPerSec = speed
-                task.chunks[idx].status = (downloadedBytes >= task.chunks[idx].totalBytes) ? .completed : .downloading
+                let isChunkDone = downloadedBytes >= task.chunks[idx].totalBytes
+                task.chunks[idx].status = isChunkDone ? .completed : .downloading
+                task.chunks[idx].speedBytesPerSec = isChunkDone ? 0 : speed
             }
 
             let totalDownloaded = task.chunks.reduce(0) { $0 + $1.downloadedBytes }
             task.downloadedBytes = totalDownloaded
 
-            let instantaneousSpeed = task.chunks.reduce(0.0) { $0 + $1.speedBytesPerSec }
-            let smoothedSpeed = SpeedMetricsCalculator.updateEMA(
-                previousSpeed: task.speedBytesPerSec,
-                instantaneousSpeed: instantaneousSpeed,
-                alpha: 0.2
-            )
-            task.speedBytesPerSec = smoothedSpeed
-            task.etaSeconds = SpeedMetricsCalculator.calculateETA(
-                totalBytes: task.totalBytes,
-                downloadedBytes: totalDownloaded,
-                speedBytesPerSec: smoothedSpeed
-            )
+            let instantaneousSpeed = task.chunks
+                .filter { $0.status == .downloading }
+                .reduce(0.0) { $0 + $1.speedBytesPerSec }
+
+            if instantaneousSpeed == 0 && task.chunks.allSatisfy({ $0.status == .completed }) {
+                task.speedBytesPerSec = 0
+                task.etaSeconds = 0
+            } else {
+                let smoothedSpeed = SpeedMetricsCalculator.updateEMA(
+                    previousSpeed: task.speedBytesPerSec,
+                    instantaneousSpeed: instantaneousSpeed,
+                    alpha: 0.2
+                )
+                task.speedBytesPerSec = smoothedSpeed
+                task.etaSeconds = SpeedMetricsCalculator.calculateETA(
+                    totalBytes: task.totalBytes,
+                    downloadedBytes: totalDownloaded,
+                    speedBytesPerSec: smoothedSpeed
+                )
+            }
 
             tasks[taskId] = task
             return task
@@ -482,12 +505,37 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
         let taskOpt = lock.withLock { () -> DownloadTaskInfo? in
             guard var task = tasks[taskId] else { return nil }
 
-            if let idx = task.chunks.firstIndex(where: { $0.id == chunk.id }) {
-                task.chunks[idx] = chunk
+            var completedChunk = chunk
+            completedChunk.status = .completed
+            completedChunk.speedBytesPerSec = 0
+
+            if let idx = task.chunks.firstIndex(where: { $0.id == completedChunk.id }) {
+                task.chunks[idx] = completedChunk
             }
 
             let totalDownloaded = task.chunks.reduce(0) { $0 + $1.downloadedBytes }
             task.downloadedBytes = totalDownloaded
+
+            let activeSpeed = task.chunks
+                .filter { $0.status == .downloading }
+                .reduce(0.0) { $0 + $1.speedBytesPerSec }
+
+            if activeSpeed == 0 && task.chunks.allSatisfy({ $0.status == .completed }) {
+                task.speedBytesPerSec = 0
+                task.etaSeconds = 0
+            } else {
+                let smoothedSpeed = SpeedMetricsCalculator.updateEMA(
+                    previousSpeed: task.speedBytesPerSec,
+                    instantaneousSpeed: activeSpeed,
+                    alpha: 0.2
+                )
+                task.speedBytesPerSec = smoothedSpeed
+                task.etaSeconds = SpeedMetricsCalculator.calculateETA(
+                    totalBytes: task.totalBytes,
+                    downloadedBytes: totalDownloaded,
+                    speedBytesPerSec: smoothedSpeed
+                )
+            }
 
             tasks[taskId] = task
             return task

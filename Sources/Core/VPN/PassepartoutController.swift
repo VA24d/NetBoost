@@ -170,9 +170,14 @@ public final class PassepartoutController: VPNControllerProtocol, @unchecked Sen
     // MARK: - Profile Resolution
 
     public func resolveProfileName(_ requested: String) async -> String {
-        if requested == "macos" {
-            if let list = try? await listProfiles(), list.contains(where: { $0.name == "macos.ovpn" }) {
-                return "macos.ovpn"
+        if requested == "macos" || requested == "macos.vpn" {
+            if let list = try? await listProfiles() {
+                if list.contains(where: { $0.name == "macos.ovpn" }) {
+                    return "macos.ovpn"
+                }
+                if list.contains(where: { $0.name == requested }) {
+                    return requested
+                }
             }
             return "macos.ovpn"
         }

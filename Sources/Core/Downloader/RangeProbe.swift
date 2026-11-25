@@ -1,5 +1,19 @@
 import Foundation
 
+public enum RangeProbeError: Error, LocalizedError, Sendable, Equatable {
+    case httpError(statusCode: Int)
+    case invalidResponse
+
+    public var errorDescription: String? {
+        switch self {
+        case .httpError(let statusCode):
+            return "Range probe failed with HTTP status \(statusCode)"
+        case .invalidResponse:
+            return "Invalid non-HTTP response received during range probe"
+        }
+    }
+}
+
 public struct RangeProbeResult: Sendable, Equatable {
     public let supportsRanges: Bool
     public let contentLength: Int64
@@ -52,7 +66,7 @@ public final class RangeProbe: RangeProbeProtocol, Sendable {
         do {
             let (_, response) = try await session.data(for: headRequest)
             guard let httpResponse = response as? HTTPURLResponse else {
-                throw URLError(.badServerResponse)
+                throw RangeProbeError.invalidResponse
             }
 
             // If HEAD is not allowed (405) or not implemented (501), fallback to GET Range probe
@@ -61,7 +75,7 @@ public final class RangeProbe: RangeProbeProtocol, Sendable {
             }
 
             guard (200...299).contains(httpResponse.statusCode) else {
-                throw URLError(URLError.Code(rawValue: httpResponse.statusCode))
+                throw RangeProbeError.httpError(statusCode: httpResponse.statusCode)
             }
 
             let acceptRanges = httpResponse.value(forHTTPHeaderField: "Accept-Ranges")
@@ -96,6 +110,8 @@ public final class RangeProbe: RangeProbeProtocol, Sendable {
         } catch let error as URLError {
             // Rethrow specific network/server errors
             throw error
+        } catch let error as RangeProbeError {
+            throw error
         } catch {
             // Try fallback GET range probe if HEAD had non-terminal issue
             return try await probeWithGetRange(url: url)
@@ -108,13 +124,15 @@ public final class RangeProbe: RangeProbeProtocol, Sendable {
         getRequest.setValue("bytes=0-0", forHTTPHeaderField: "Range")
         getRequest.timeoutInterval = 10.0
 
-        let (_, response) = try await session.data(for: getRequest)
+        let (bytes, response) = try await session.bytes(for: getRequest)
+        defer { bytes.task.cancel() }
+
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw URLError(.badServerResponse)
+            throw RangeProbeError.invalidResponse
         }
 
         guard httpResponse.statusCode == 200 || httpResponse.statusCode == 206 else {
-            throw URLError(URLError.Code(rawValue: httpResponse.statusCode))
+            throw RangeProbeError.httpError(statusCode: httpResponse.statusCode)
         }
 
         let acceptRanges = httpResponse.value(forHTTPHeaderField: "Accept-Ranges")
@@ -159,17 +177,68 @@ public final class RangeProbe: RangeProbeProtocol, Sendable {
     }
 
     public static func parseFilename(from contentDisposition: String?, fallbackURL: URL) -> String {
-        if let cd = contentDisposition, let nameRange = cd.range(of: "filename=") {
-            let remainder = cd[nameRange.upperBound...]
-            let rawName = remainder.components(separatedBy: ";").first ?? ""
-            let trimmed = rawName.trimmingCharacters(in: CharacterSet(charactersIn: "\" '"))
-            if !trimmed.isEmpty {
-                return trimmed
+        if let cd = contentDisposition {
+            let parts = cd.components(separatedBy: ";")
+
+            // Prefer RFC 5987 filename*= (e.g. filename*=UTF-8''my%20file.iso)
+            for part in parts {
+                let trimmedPart = part.trimmingCharacters(in: .whitespacesAndNewlines)
+                let lower = trimmedPart.lowercased()
+                if lower.hasPrefix("filename*=") {
+                    let rawValue = String(trimmedPart.dropFirst("filename*=".count))
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "\" '"))
+                    let encodedPart: String
+                    if let quotePair = rawValue.range(of: "''") {
+                        encodedPart = String(rawValue[quotePair.upperBound...])
+                    } else {
+                        encodedPart = rawValue
+                    }
+                    let decoded = encodedPart.removingPercentEncoding ?? encodedPart
+                    if let safe = sanitizeFilename(decoded) {
+                        return safe
+                    }
+                }
+            }
+
+            // Standard filename= parameter
+            for part in parts {
+                let trimmedPart = part.trimmingCharacters(in: .whitespacesAndNewlines)
+                let lower = trimmedPart.lowercased()
+                if lower.hasPrefix("filename=") {
+                    let rawValue = String(trimmedPart.dropFirst("filename=".count))
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "\" '"))
+                    if let safe = sanitizeFilename(rawValue) {
+                        return safe
+                    }
+                }
             }
         }
 
-        let last = fallbackURL.lastPathComponent
-        return last.isEmpty || last == "/" ? "download.bin" : last
+        if let safeFallback = sanitizeFilename(fallbackURL.lastPathComponent) {
+            return safeFallback
+        }
+        return "download.bin"
+    }
+
+    private static func sanitizeFilename(_ raw: String) -> String? {
+        // Strip control characters first
+        let noControlScalars = raw.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        let cleaned = String(String.UnicodeScalarView(noControlScalars))
+            .replacingOccurrences(of: "\\", with: "/")
+
+        // Take last path component across any slashes
+        let components = cleaned.split(separator: "/", omittingEmptySubsequences: true)
+        guard let lastComponent = components.last else { return nil }
+
+        let sanitized = String(lastComponent)
+            .replacingOccurrences(of: "..", with: "")
+            .replacingOccurrences(of: "/", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !sanitized.isEmpty, sanitized != ".", sanitized != ".." else {
+            return nil
+        }
+        return sanitized
     }
 
     public static func calculateSuggestedChunkCount(fileSize: Int64, supportsRanges: Bool) -> Int {

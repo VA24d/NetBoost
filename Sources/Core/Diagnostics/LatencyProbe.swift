@@ -22,10 +22,10 @@ public final class LatencyProbe: Sendable {
 
     public init() {}
 
-    /// Performs a probe against the target host, attempting a TCP connect probe first (or ping fallback).
+    /// Performs a probe against the target host, attempting fast TCP connect probes first (with ping fallback).
     /// - Parameters:
     ///   - host: Hostname or IPv4/IPv6 address.
-    ///   - port: TCP port to probe (defaults to 80 for HTTP, 443 for HTTPS, or 53/common services).
+    ///   - port: TCP port to probe (defaults to 80, with concurrent 443 fallback when 80 is specified).
     ///   - timeout: Maximum wait time in seconds.
     /// - Returns: `ProbeResult` containing reachability, latency, packet loss, and timestamp.
     public func probe(
@@ -34,12 +34,26 @@ public final class LatencyProbe: Sendable {
         timeout: TimeInterval = 2.0
     ) async -> ProbeResult {
         let startTime = Date()
+        let resolvedIP = await resolveHostToIPAsync(host)
+        let connectTarget = resolvedIP ?? host
+        let tcpTimeout = min(0.5, max(0.05, timeout))
 
-        // Resolve IP if possible
-        let resolvedIP = resolveHostToIP(host)
-
-        // Try TCP socket connect probe
-        if let tcpLatency = await tcpConnectProbe(host: resolvedIP ?? host, port: port, timeout: timeout) {
+        // Try crisp TCP socket connect probe (and 443 concurrently if default port 80)
+        if port == 80 {
+            async let port80 = tcpConnectProbe(host: connectTarget, port: 80, timeout: tcpTimeout)
+            async let port443 = tcpConnectProbe(host: connectTarget, port: 443, timeout: tcpTimeout)
+            let (lat80, lat443) = await (port80, port443)
+            if let tcpLatency = lat80 ?? lat443 {
+                return ProbeResult(
+                    targetHost: host,
+                    targetIP: resolvedIP,
+                    isReachable: true,
+                    latencyMs: tcpLatency,
+                    packetLossPercent: 0.0,
+                    timestamp: startTime
+                )
+            }
+        } else if let tcpLatency = await tcpConnectProbe(host: connectTarget, port: port, timeout: tcpTimeout) {
             return ProbeResult(
                 targetHost: host,
                 targetIP: resolvedIP,
@@ -50,7 +64,7 @@ public final class LatencyProbe: Sendable {
             )
         }
 
-        // Fallback: ping command probe
+        // Fallback: fast ICMP ping command probe
         let pingResult = await pingProbe(host: host, timeout: timeout)
         return ProbeResult(
             targetHost: host,
@@ -83,6 +97,26 @@ public final class LatencyProbe: Sendable {
         }
     }
 
+    /// Runs `/usr/sbin/traceroute -n -m <maxHops> -w 1 <target>` and returns non-empty output lines.
+    public func traceroute(target: String, maxHops: Int = 12) async -> [String] {
+        guard Self.isSafeHostToken(target) else { return [] }
+        let clampedHops = max(1, min(64, maxHops))
+        do {
+            let output = try await ShellCommand.run(
+                "/usr/sbin/traceroute",
+                arguments: ["-n", "-m", String(clampedHops), "-w", "1", target],
+                timeout: TimeInterval(clampedHops + 3)
+            )
+            let lines = output.stdout
+                .components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            return lines
+        } catch {
+            return []
+        }
+    }
+
     // MARK: - TCP Socket Connect Probe
 
     private func tcpConnectProbe(host: String, port: Int, timeout: TimeInterval) async -> Double? {
@@ -91,8 +125,9 @@ public final class LatencyProbe: Sendable {
                 let start = DispatchTime.now()
 
                 var hints = addrinfo()
-                hints.ai_family = AF_INET // IPv4
+                hints.ai_family = AF_UNSPEC
                 hints.ai_socktype = SOCK_STREAM
+                hints.ai_protocol = IPPROTO_TCP
 
                 var res: UnsafeMutablePointer<addrinfo>?
                 let portStr = String(port)
@@ -102,48 +137,47 @@ public final class LatencyProbe: Sendable {
                 }
                 defer { freeaddrinfo(res) }
 
-                let sock = socket(addr.pointee.ai_family, addr.pointee.ai_socktype, addr.pointee.ai_protocol)
-                guard sock >= 0 else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                defer { close(sock) }
+                let timeoutMs = Int32(max(1, Int(ceil(timeout * 1000.0))))
+                var cursor: UnsafeMutablePointer<addrinfo>? = addr
 
-                // Set non-blocking for connect timeout
-                let flags = fcntl(sock, F_GETFL, 0)
-                _ = fcntl(sock, F_SETFL, flags | O_NONBLOCK)
+                while let current = cursor {
+                    let info = current.pointee
+                    cursor = current.pointee.ai_next
 
-                let connRes = connect(sock, addr.pointee.ai_addr, addr.pointee.ai_addrlen)
-                if connRes == 0 {
-                    let end = DispatchTime.now()
-                    let nano = end.uptimeNanoseconds - start.uptimeNanoseconds
-                    continuation.resume(returning: Double(nano) / 1_000_000.0)
-                    return
-                }
+                    let sock = socket(info.ai_family, info.ai_socktype, info.ai_protocol)
+                    guard sock >= 0 else { continue }
+                    defer { close(sock) }
 
-                if errno != EINPROGRESS {
-                    continuation.resume(returning: nil)
-                    return
-                }
+                    let flags = fcntl(sock, F_GETFL, 0)
+                    if flags >= 0 {
+                        _ = fcntl(sock, F_SETFL, flags | O_NONBLOCK)
+                    }
 
-                // Poll with select for timeout
-                var fdSet = fd_set()
-                fdSet.zero()
-                fdSet.set(sock)
-
-                var tv = timeval()
-                tv.tv_sec = Int(timeout)
-                tv.tv_usec = Int32((timeout.truncatingRemainder(dividingBy: 1)) * 1_000_000)
-
-                let selRes = select(sock + 1, nil, &fdSet, nil, &tv)
-                if selRes > 0 {
-                    var error: Int32 = 0
-                    var len = socklen_t(MemoryLayout<Int32>.size)
-                    if getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &len) == 0 && error == 0 {
+                    let connRes = connect(sock, info.ai_addr, info.ai_addrlen)
+                    if connRes == 0 {
                         let end = DispatchTime.now()
                         let nano = end.uptimeNanoseconds - start.uptimeNanoseconds
                         continuation.resume(returning: Double(nano) / 1_000_000.0)
                         return
+                    }
+
+                    guard errno == EINPROGRESS else { continue }
+
+                    var pfd = pollfd(fd: sock, events: Int16(POLLOUT), revents: 0)
+                    var pollRes: Int32 = 0
+                    repeat {
+                        pollRes = Darwin.poll(&pfd, 1, timeoutMs)
+                    } while pollRes < 0 && errno == EINTR
+
+                    if pollRes > 0 && (pfd.revents & Int16(POLLOUT | POLLERR | POLLHUP)) != 0 {
+                        var error: Int32 = 0
+                        var len = socklen_t(MemoryLayout<Int32>.size)
+                        if getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &len) == 0 && error == 0 {
+                            let end = DispatchTime.now()
+                            let nano = end.uptimeNanoseconds - start.uptimeNanoseconds
+                            continuation.resume(returning: Double(nano) / 1_000_000.0)
+                            return
+                        }
                     }
                 }
 
@@ -155,12 +189,15 @@ public final class LatencyProbe: Sendable {
     // MARK: - ICMP Ping Probe
 
     private func pingProbe(host: String, timeout: TimeInterval) async -> (isReachable: Bool, latencyMs: Double, packetLossPercent: Double, targetIP: String?) {
+        guard Self.isSafeHostToken(host) else {
+            return (false, 0.0, 100.0, nil)
+        }
         do {
-            let timeoutSec = max(1, Int(ceil(timeout)))
+            let waitMs = max(200, min(1000, Int(ceil(timeout * 500.0))))
             let output = try await ShellCommand.run(
                 "/sbin/ping",
-                arguments: ["-c", "2", "-W", String(timeoutSec * 1000), host],
-                timeout: timeout + 1.0
+                arguments: ["-c", "2", "-i", "0.2", "-W", String(waitMs), host],
+                timeout: max(1.5, timeout + 0.5)
             )
 
             guard output.succeeded else {
@@ -219,6 +256,14 @@ public final class LatencyProbe: Sendable {
         return (isReachable, avgLatency, packetLoss, targetIP)
     }
 
+    private func resolveHostToIPAsync(_ host: String) async -> String? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: self.resolveHostToIP(host))
+            }
+        }
+    }
+
     private func resolveHostToIP(_ host: String) -> String? {
         var hints = addrinfo()
         hints.ai_family = AF_INET
@@ -235,6 +280,11 @@ public final class LatencyProbe: Sendable {
             }
         }
         return nil
+    }
+
+    private static func isSafeHostToken(_ host: String) -> Bool {
+        guard !host.isEmpty, !host.hasPrefix("-") else { return false }
+        return host.range(of: "^[A-Za-z0-9.:_-]+$", options: .regularExpression) != nil
     }
 }
 
@@ -256,22 +306,5 @@ public struct EndpointRTTProber: Sendable {
             packetLossPercent: packetLoss,
             timestamp: Date()
         )
-    }
-}
-
-// Helper fd_set extensions
-private extension fd_set {
-    mutating func zero() {
-        self = fd_set()
-    }
-
-    mutating func set(_ fd: Int32) {
-        let intOffset = Int(fd / 32)
-        let bitOffset = fd % 32
-        let mask: Int32 = 1 << bitOffset
-        withUnsafeMutableBytes(of: &self) { ptr in
-            let bound = ptr.bindMemory(to: Int32.self)
-            bound[intOffset] |= mask
-        }
     }
 }

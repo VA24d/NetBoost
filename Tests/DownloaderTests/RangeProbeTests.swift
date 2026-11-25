@@ -117,4 +117,49 @@ struct RangeProbeTests {
             _ = try await RangeProbe.probe(url: testURL, session: session)
         }
     }
+
+    @Test("Filename parser sanitizes path traversal, control characters, and supports RFC 5987 filename*")
+    func testFilenameSanitizationAndUTF8Star() {
+        let fallback = URL(string: "https://example.com/files/archive.zip")!
+
+        let traversal1 = RangeProbe.parseFilename(from: "attachment; filename=\"../../etc/passwd\"", fallbackURL: fallback)
+        #expect(traversal1 == "passwd")
+
+        let traversal2 = RangeProbe.parseFilename(from: "attachment; filename=\"..\\\\..\\\\evil.sh\"", fallbackURL: fallback)
+        #expect(traversal2 == "evil.sh")
+
+        let dotDotOnly = RangeProbe.parseFilename(from: "attachment; filename=\"..\"", fallbackURL: fallback)
+        #expect(dotDotOnly == "archive.zip")
+
+        let controlChars = RangeProbe.parseFilename(from: "attachment; filename=\"bad\0\n\rname.bin\"", fallbackURL: fallback)
+        #expect(controlChars == "badname.bin")
+
+        let rfc5987 = RangeProbe.parseFilename(
+            from: "attachment; filename=\"fallback.iso\"; filename*=UTF-8''campus%20dataset%20v2.iso",
+            fallbackURL: fallback
+        )
+        #expect(rfc5987 == "campus dataset v2.iso")
+
+        let rfc5987Traversal = RangeProbe.parseFilename(
+            from: "attachment; filename*=UTF-8''..%2F..%2Fsecret.tar.gz",
+            fallbackURL: fallback
+        )
+        #expect(rfc5987Traversal == "secret.tar.gz")
+    }
+
+    @Test("HTTP 500 throws clean RangeProbeError.httpError(statusCode: 500)")
+    func testHTTP500ThrowsRangeProbeError() async throws {
+        let server = MockHTTPServer()
+        server.force500Error = true
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let testURL = URL(string: "http://127.0.0.1:\(port)/err500.bin")!
+        do {
+            _ = try await RangeProbe.probe(url: testURL)
+            Issue.record("Expected RangeProbeError.httpError")
+        } catch let error as RangeProbeError {
+            #expect(error == .httpError(statusCode: 500))
+        }
+    }
 }

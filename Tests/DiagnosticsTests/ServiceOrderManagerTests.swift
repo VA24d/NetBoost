@@ -60,4 +60,57 @@ struct ServiceOrderManagerTests {
         let entries = ServiceOrderManager.parseServiceOrder(output: "")
         #expect(entries.isEmpty)
     }
+
+    @Test("Shell script safely quotes service names with spaces and metacharacters")
+    func testOrderServicesShellQuoting() {
+        let script = ServiceOrderManager.makeOrderNetworkServicesShellScript(orderedServices: [
+            "USB 10/100 LAN",
+            "Wi-Fi",
+            "Test; $(whoami)"
+        ])
+        #expect(script == "'/usr/sbin/networksetup' '-ordernetworkservices' 'USB 10/100 LAN' 'Wi-Fi' 'Test; $(whoami)'")
+    }
+
+    @Test("reorderServices re-throws elevationDenied without calling helper and propagates helper failures")
+    func testReorderServicesErrorPropagation() async {
+        final class MockExecutor: PrivilegeCommandExecuting, @unchecked Sendable {
+            var isRoot: Bool = false
+            var helperPath: String? = "/usr/local/bin/netboost-helper.sh"
+            var elevatedError: Error? = nil
+            var helperError: Error? = nil
+            var helperCalls: Int = 0
+
+            func locateHelperScript() -> String? { helperPath }
+            func runCommand(_ executable: String, arguments: [String]) async throws -> ShellOutput { ShellOutput(stdout: "", stderr: "", exitCode: 0) }
+            func runBash(_ script: String) async throws -> ShellOutput { ShellOutput(stdout: "", stderr: "", exitCode: 0) }
+            func runElevated(script: String) async throws -> ShellOutput {
+                if let err = elevatedError { throw err }
+                return ShellOutput(stdout: "", stderr: "", exitCode: 0)
+            }
+            func runHelper(action: String, arguments: [String]) async throws -> ShellOutput {
+                helperCalls += 1
+                if let err = helperError { throw err }
+                return ShellOutput(stdout: "", stderr: "", exitCode: 0)
+            }
+        }
+
+        let deniedExec = MockExecutor()
+        deniedExec.elevatedError = PrivilegeError.elevationDenied
+        let deniedManager = ServiceOrderManager(executor: deniedExec)
+
+        await #expect(throws: PrivilegeError.elevationDenied) {
+            try await deniedManager.reorderServices(orderedServices: ["USB 10/100 LAN", "Wi-Fi"])
+        }
+        #expect(deniedExec.helperCalls == 0)
+
+        let helperFailExec = MockExecutor()
+        helperFailExec.elevatedError = PrivilegeError.executionFailed("elevated fail")
+        helperFailExec.helperError = PrivilegeError.executionFailed("helper fail")
+        let helperFailManager = ServiceOrderManager(executor: helperFailExec)
+
+        await #expect(throws: PrivilegeError.executionFailed("helper fail")) {
+            try await helperFailManager.reorderServices(orderedServices: ["USB 10/100 LAN", "Wi-Fi"])
+        }
+        #expect(helperFailExec.helperCalls == 1)
+    }
 }

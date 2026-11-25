@@ -6,7 +6,7 @@ import AppKit
 @testable import NetBoostCore
 @testable import NetBoostApp
 
-@Suite("Tier 5 - Single Upfront Authorization & Elevation Stress Tests", .tags(.tier5, .process_runner))
+@Suite("Tier 5 - Single Upfront Authorization & Elevation Stress Tests", .serialized, .tags(.tier5, .process_runner))
 struct Tier5_SingleAuthElevationStressTests {
 
     // MARK: - Test 1: Error Classification Bug in handleElevationResult
@@ -167,6 +167,8 @@ struct Tier5_SingleAuthElevationStressTests {
     @Test("T5-Auth-08: PrivilegeHelper upfront authorization session caching and token lifecycle")
     func testUpfrontAuthorizationSessionCaching() {
         PrivilegeHelper.revokeAuthorization()
+        defer { PrivilegeHelper.revokeAuthorization() }
+
         if !PrivilegeHelper.isRoot {
             #expect(!PrivilegeHelper.isAuthorized)
             #expect(PrivilegeHelper.sessionToken == nil)
@@ -180,6 +182,17 @@ struct Tier5_SingleAuthElevationStressTests {
             #expect(PrivilegeHelper.sessionToken == nil)
         } else {
             #expect(PrivilegeHelper.isAuthorized)
+        }
+
+        // syncAuthorizationFromDaemon must complete promptly without prompting UI.
+        let synced = PrivilegeHelper.syncAuthorizationFromDaemon()
+        if synced {
+            #expect(PrivilegeHelper.isAuthorized)
+            PrivilegeHelper.revokeAuthorization()
+            if !PrivilegeHelper.isRoot {
+                #expect(!PrivilegeHelper.isAuthorized)
+                #expect(PrivilegeHelper.sessionToken == nil)
+            }
         }
     }
 
@@ -208,20 +221,32 @@ struct Tier5_SingleAuthElevationStressTests {
 
     // MARK: - Test 10: AppState Upfront Authorization Trigger
 
-    @Test("T5-Auth-10: AppState requestUpfrontAuthorization handles grant and denial cleanly")
+    @Test("T5-Auth-10: AppState requestUpfrontAuthorization and syncAuthorizationStatus track PrivilegeHelper state")
     @MainActor
     func testAppStateUpfrontAuthorizationTrigger() async {
-        let appState = AppState(startBackgroundTimers: false)
+        PrivilegeHelper.revokeAuthorization()
+        defer { PrivilegeHelper.revokeAuthorization() }
+
         PrivilegeHelper.setAuthorizedForTesting(true)
-
+        let authorizedState = AppStateTestHarness(startBackgroundTimers: false).appState
         #expect(PrivilegeHelper.isAuthorized)
-        await appState.requestUpfrontAuthorization()
+        #expect(authorizedState.isAuthorized)
 
-        if PrivilegeHelper.isAuthorized {
-            #expect(appState.isAuthorized)
-            #expect(appState.authorizationSummary == "Authorized")
-        }
+        await authorizedState.requestUpfrontAuthorization()
+        #expect(authorizedState.isAuthorized)
+        #expect(authorizedState.authorizationSummary == "Authorized")
+        #expect(authorizedState.repairLogs.contains(where: { $0.contains("authorized persistently") }))
+
+        let directState = AppState(startBackgroundTimers: false)
+        await directState.requestUpfrontAuthorization()
+        #expect(directState.isAuthorized)
+        #expect(directState.authorizationSummary == "Authorized")
 
         PrivilegeHelper.revokeAuthorization()
+        let unauthState = AppStateTestHarness(startBackgroundTimers: false).appState
+        await unauthState.refreshAuthorizationStatus()
+        #expect(unauthState.isAuthorized == PrivilegeHelper.isAuthorized)
+        let daemonSynced = await PrivilegeHelper.syncAuthorizationFromDaemonAsync()
+        #expect(unauthState.isAuthorized == (PrivilegeHelper.isRoot || daemonSynced))
     }
 }

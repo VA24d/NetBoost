@@ -86,9 +86,33 @@ public final class ShellCommand: Sendable {
             throw ShellError.processError(error.localizedDescription)
         }
 
-        // Handle timeout using cooperative async task
+        final class LockedFlag: @unchecked Sendable {
+            private let lock = NSLock()
+            private var flag = false
+
+            func set() {
+                lock.withLock { flag = true }
+            }
+
+            func getAndSet() -> Bool {
+                lock.withLock {
+                    let prev = flag
+                    flag = true
+                    return prev
+                }
+            }
+
+            var isSet: Bool {
+                lock.withLock { flag }
+            }
+        }
+
+        let exitedFlag = LockedFlag()
+        let timeoutFlag = LockedFlag()
+        let resumeFlag = LockedFlag()
+
+        // Wait for process exit without blocking a cooperative thread, draining pipes concurrently.
         return try await withThrowingTaskGroup(of: ShellOutput.self) { group in
-            // Task 1: Wait for process termination and collect pipes concurrently
             group.addTask {
                 async let stdoutDataAsync = Task.detached {
                     stdoutPipe.fileHandleForReading.readDataToEndOfFile()
@@ -98,18 +122,46 @@ public final class ShellCommand: Sendable {
                     stderrPipe.fileHandleForReading.readDataToEndOfFile()
                 }.value
 
-                process.waitUntilExit()
+                await withTaskCancellationHandler {
+                    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                        let resumeOnce: @Sendable () -> Void = {
+                            if !resumeFlag.getAndSet() {
+                                continuation.resume()
+                            }
+                        }
+                        process.terminationHandler = { _ in
+                            exitedFlag.set()
+                            resumeOnce()
+                        }
+                        if !process.isRunning {
+                            exitedFlag.set()
+                            resumeOnce()
+                        }
+                    }
+                } onCancel: {
+                    if process.isRunning {
+                        process.terminate()
+                        let pid = process.processIdentifier
+                        if pid > 0 {
+                            DispatchQueue.global().asyncAfter(deadline: .now() + 0.25) {
+                                if !exitedFlag.isSet {
+                                    _ = Darwin.kill(pid, SIGKILL)
+                                }
+                            }
+                        }
+                    }
+                }
 
                 let stdoutData = await stdoutDataAsync
                 let stderrData = await stderrDataAsync
+                let duration = Date().timeIntervalSince(startTime)
+
+                if Task.isCancelled || timeoutFlag.isSet || duration >= timeout || process.terminationReason == .uncaughtSignal {
+                    throw ShellError.timedOut(timeout: timeout)
+                }
 
                 let stdoutStr = String(data: stdoutData, encoding: .utf8) ?? ""
                 let stderrStr = String(data: stderrData, encoding: .utf8) ?? ""
-                let duration = Date().timeIntervalSince(startTime)
-
-                if Task.isCancelled || duration >= timeout || process.terminationReason == .uncaughtSignal {
-                    throw ShellError.timedOut(timeout: timeout)
-                }
 
                 return ShellOutput(
                     stdout: stdoutStr,
@@ -119,16 +171,21 @@ public final class ShellCommand: Sendable {
                 )
             }
 
-            // Task 2: Timeout watchdog
+            // Task 2: Timeout watchdog with SIGTERM -> SIGKILL escalation
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                timeoutFlag.set()
                 if process.isRunning {
                     process.terminate()
+                    let pid = process.processIdentifier
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    if !exitedFlag.isSet && pid > 0 {
+                        _ = Darwin.kill(pid, SIGKILL)
+                    }
                 }
                 throw ShellError.timedOut(timeout: timeout)
             }
 
-            // Await the first finished task
             guard let result = try await group.next() else {
                 throw ShellError.processError("Process failed to yield output")
             }
@@ -145,6 +202,11 @@ public final class ShellCommand: Sendable {
         timeout: TimeInterval = 30.0
     ) async throws -> ShellOutput {
         try await run("/bin/bash", arguments: ["-c", script], environment: environment, timeout: timeout)
+    }
+
+    /// Safely single-quotes an arbitrary argument for POSIX /bin/sh or /bin/bash execution.
+    public static func shellQuote(_ argument: String) -> String {
+        "'" + argument.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
     }
 
     private static func resolvePath(for command: String) -> String? {

@@ -1,12 +1,98 @@
 import Foundation
 
+internal protocol PrivilegeCommandExecuting: Sendable {
+    var isRoot: Bool { get }
+    func locateHelperScript() -> String?
+    func runCommand(_ executable: String, arguments: [String]) async throws -> ShellOutput
+    func runBash(_ script: String) async throws -> ShellOutput
+    func runElevated(script: String) async throws -> ShellOutput
+    func runHelper(action: String, arguments: [String]) async throws -> ShellOutput
+    func runDaemonAction(action: HelperAction, arguments: [String]) async throws -> ShellOutput?
+}
+
+internal extension PrivilegeCommandExecuting {
+    func runDaemonAction(action: HelperAction, arguments: [String]) async throws -> ShellOutput? {
+        nil
+    }
+
+    func executeElevatedWithFallback(
+        daemonAction: HelperAction?,
+        daemonArguments: [String],
+        fallbackScript: String,
+        helperAction: String?,
+        helperArguments: [String]
+    ) async throws {
+        if let daemonAction {
+            do {
+                if let daemonOutput = try await runDaemonAction(action: daemonAction, arguments: daemonArguments) {
+                    guard daemonOutput.succeeded else {
+                        throw PrivilegeError.executionFailed(daemonOutput.stderr)
+                    }
+                    return
+                }
+            } catch PrivilegeError.helperNotFound {
+                // Fall back to legacy osascript / helper script when daemon is unavailable.
+            }
+        }
+
+        do {
+            _ = try await runElevated(script: fallbackScript)
+        } catch PrivilegeError.elevationDenied {
+            throw PrivilegeError.elevationDenied
+        } catch {
+            guard let action = helperAction, locateHelperScript() != nil else {
+                throw error
+            }
+            _ = try await runHelper(action: action, arguments: helperArguments)
+        }
+    }
+}
+
+internal struct SystemPrivilegeCommandExecutor: PrivilegeCommandExecuting {
+    var isRoot: Bool { PrivilegeHelper.isRoot }
+
+    func locateHelperScript() -> String? {
+        PrivilegeHelper.locateHelperScript()
+    }
+
+    func runCommand(_ executable: String, arguments: [String]) async throws -> ShellOutput {
+        try await ShellCommand.run(executable, arguments: arguments)
+    }
+
+    func runBash(_ script: String) async throws -> ShellOutput {
+        try await ShellCommand.runBash(script)
+    }
+
+    func runElevated(script: String) async throws -> ShellOutput {
+        try await PrivilegeHelper.runElevated(script: script)
+    }
+
+    func runHelper(action: String, arguments: [String]) async throws -> ShellOutput {
+        try await PrivilegeHelper.runHelper(action: action, arguments: arguments)
+    }
+
+    func runDaemonAction(action: HelperAction, arguments: [String]) async throws -> ShellOutput? {
+        guard PrivilegeHelper.locateBundledOrBuiltHelperExecutable() != nil || PrivilegeHelper.isHelperDaemonInstalled else {
+            return nil
+        }
+        return try await PrivilegeHelper.runDaemonAction(action: action, arguments: arguments)
+    }
+}
+
 /// Coordinates system remediation actions for DNS, ARP, IPv6, and Web Proxies.
 public final class RepairRoutines: @unchecked Sendable {
 
     private var auditLog: [String] = []
     private let lock = NSLock()
+    private let executor: any PrivilegeCommandExecuting
 
-    public init() {}
+    public init() {
+        self.executor = SystemPrivilegeCommandExecutor()
+    }
+
+    internal init(executor: any PrivilegeCommandExecuting) {
+        self.executor = executor
+    }
 
     public var history: [String] {
         lock.lock()
@@ -20,47 +106,111 @@ public final class RepairRoutines: @unchecked Sendable {
         auditLog.append("[\(Date())] \(message)")
     }
 
+    // MARK: - Quoted Shell Script Builders
+
+    public static func shellCommandString(_ args: [String]) -> String {
+        args.map(ShellCommand.shellQuote).joined(separator: " ")
+    }
+
+    public static func makeBatchAutoFixScript(service: String = "Wi-Fi", mtu: Int = 1280) -> String {
+        let (dns1, dns2) = DNSFlushRoutine.makeCommands()
+        let arpCmd = ARPFlushRoutine.makeFlushAllCommand()
+        let mtuCmd = ["/usr/sbin/networksetup", "-setMTU", service, String(mtu)]
+        return [mtuCmd, dns1, dns2, arpCmd]
+            .map { shellCommandString($0) }
+            .joined(separator: " && ")
+    }
+
+    public static func makeCleanProxiesScript(service: String) -> String {
+        let cmd1 = ProxySettingsManager.makeDisableAutoProxyCommand(service: service)
+        let cmd2 = ProxySettingsManager.makeDisableWebProxyCommand(service: service)
+        let cmd3 = ProxySettingsManager.makeDisableSecureWebProxyCommand(service: service)
+        return [cmd1, cmd2, cmd3]
+            .map { shellCommandString($0) }
+            .joined(separator: " && ")
+    }
+
+    private func executePrivileged(
+        command: [String],
+        daemonAction: HelperAction? = nil,
+        helperAction: String? = nil,
+        helperArguments: [String] = []
+    ) async throws {
+        if executor.isRoot {
+            guard let executable = command.first else {
+                throw ShellError.processError("Empty command")
+            }
+            let output = try await executor.runCommand(executable, arguments: Array(command.dropFirst()))
+            guard output.succeeded else {
+                throw ShellError.executionFailed(exitCode: output.exitCode, stdout: output.stdout, stderr: output.stderr)
+            }
+            return
+        }
+
+        let quotedScript = Self.shellCommandString(command)
+        try await executor.executeElevatedWithFallback(
+            daemonAction: daemonAction,
+            daemonArguments: helperArguments,
+            fallbackScript: quotedScript,
+            helperAction: helperAction,
+            helperArguments: helperArguments
+        )
+    }
+
+    private func executePrivilegedScript(
+        _ script: String,
+        daemonAction: HelperAction? = nil,
+        helperAction: String? = nil,
+        helperArguments: [String] = []
+    ) async throws {
+        if executor.isRoot {
+            let output = try await executor.runBash(script)
+            guard output.succeeded else {
+                throw ShellError.executionFailed(exitCode: output.exitCode, stdout: output.stdout, stderr: output.stderr)
+            }
+            return
+        }
+
+        try await executor.executeElevatedWithFallback(
+            daemonAction: daemonAction,
+            daemonArguments: helperArguments,
+            fallbackScript: script,
+            helperAction: helperAction,
+            helperArguments: helperArguments
+        )
+    }
+
     // MARK: - DNS Cache Flush
 
     public func flushDNS() async throws {
         let (cmd1, cmd2) = DNSFlushRoutine.makeCommands()
-        if PrivilegeHelper.isRoot {
-            _ = try await ShellCommand.run(cmd1[0], arguments: Array(cmd1.dropFirst()))
-            _ = try await ShellCommand.run(cmd2[0], arguments: Array(cmd2.dropFirst()))
+        if executor.isRoot {
+            let out1 = try await executor.runCommand(cmd1[0], arguments: Array(cmd1.dropFirst()))
+            guard out1.succeeded else {
+                throw ShellError.executionFailed(exitCode: out1.exitCode, stdout: out1.stdout, stderr: out1.stderr)
+            }
+            let out2 = try await executor.runCommand(cmd2[0], arguments: Array(cmd2.dropFirst()))
+            guard out2.succeeded else {
+                throw ShellError.executionFailed(exitCode: out2.exitCode, stdout: out2.stdout, stderr: out2.stderr)
+            }
         } else {
             // dscacheutil can be run unprivileged; mDNSResponder requires elevation or helper
-            _ = try? await ShellCommand.run(cmd1[0], arguments: Array(cmd1.dropFirst()))
-            do {
-                _ = try await PrivilegeHelper.runElevated(script: "\(cmd1.joined(separator: " ")) && \(cmd2.joined(separator: " "))")
-            } catch PrivilegeError.elevationDenied {
-                throw PrivilegeError.elevationDenied
-            } catch {
-                // If helper is present, try helper
-                _ = try? await PrivilegeHelper.runHelper(action: "flush-dns")
-            }
+            _ = try? await executor.runCommand(cmd1[0], arguments: Array(cmd1.dropFirst()))
+            let combined = "\(Self.shellCommandString(cmd1)) && \(Self.shellCommandString(cmd2))"
+            try await executePrivilegedScript(combined, daemonAction: .flushDNS, helperAction: "flush-dns")
         }
         recordEvent("DNS cache flushed (dscacheutil + killall mDNSResponder)")
     }
 
     /// Executes MTU adjustment, DNS flush, and ARP table flush in a single elevation pass so the user is prompted at most ONCE.
     public func executeBatchAutoFix(service: String = "Wi-Fi", mtu: Int = 1280) async throws {
-        let (dns1, dns2) = DNSFlushRoutine.makeCommands()
-        let arpCmd = ARPFlushRoutine.makeFlushAllCommand()
-        let mtuCmd = ["/usr/sbin/networksetup", "-setMTU", service, String(mtu)]
-
-        let combined = "\(mtuCmd.joined(separator: " ")) && \(dns1.joined(separator: " ")) && \(dns2.joined(separator: " ")) && \(arpCmd.joined(separator: " "))"
-
-        if PrivilegeHelper.isRoot {
-            _ = try await ShellCommand.runBash(combined)
-        } else {
-            do {
-                _ = try await PrivilegeHelper.runElevated(script: combined)
-            } catch PrivilegeError.elevationDenied {
-                throw PrivilegeError.elevationDenied
-            } catch {
-                _ = try? await PrivilegeHelper.runHelper(action: "batch-autofix", arguments: [service, String(mtu)])
-            }
-        }
+        let combined = Self.makeBatchAutoFixScript(service: service, mtu: mtu)
+        try await executePrivilegedScript(
+            combined,
+            daemonAction: .batchAutoFix,
+            helperAction: "batch-autofix",
+            helperArguments: [service, String(mtu)]
+        )
         recordEvent("Batch Auto-Fix executed: MTU set to \(mtu), DNS flushed, ARP cleared (single elevation)")
     }
 
@@ -68,17 +218,12 @@ public final class RepairRoutines: @unchecked Sendable {
 
     public func flushARP(targetIP: String? = nil) async throws {
         let cmd = targetIP != nil ? ARPFlushRoutine.makeFlushHostCommand(ip: targetIP!) : ARPFlushRoutine.makeFlushAllCommand()
-        if PrivilegeHelper.isRoot {
-            _ = try await ShellCommand.run(cmd[0], arguments: Array(cmd.dropFirst()))
-        } else {
-            do {
-                _ = try await PrivilegeHelper.runElevated(script: cmd[0], arguments: Array(cmd.dropFirst()))
-            } catch PrivilegeError.elevationDenied {
-                throw PrivilegeError.elevationDenied
-            } catch {
-                _ = try? await PrivilegeHelper.runHelper(action: "flush-arp")
-            }
-        }
+        try await executePrivileged(
+            command: cmd,
+            daemonAction: .flushARP,
+            helperAction: targetIP == nil ? "flush-arp" : nil,
+            helperArguments: targetIP.map { [$0] } ?? []
+        )
         recordEvent("ARP table flushed (\(targetIP ?? "all entries"))")
     }
 
@@ -86,27 +231,22 @@ public final class RepairRoutines: @unchecked Sendable {
 
     public func resetDNS(service: String) async throws {
         let cmd = DNSOverrideManager.makeResetDNSCommand(service: service)
-        if PrivilegeHelper.isRoot {
-            _ = try await ShellCommand.run(cmd[0], arguments: Array(cmd.dropFirst()))
-        } else {
-            do {
-                _ = try await PrivilegeHelper.runElevated(script: cmd[0], arguments: Array(cmd.dropFirst()))
-            } catch PrivilegeError.elevationDenied {
-                throw PrivilegeError.elevationDenied
-            } catch {
-                _ = try? await PrivilegeHelper.runHelper(action: "reset-dns", arguments: [service])
-            }
-        }
+        try await executePrivileged(
+            command: cmd,
+            daemonAction: .resetDNS,
+            helperAction: "reset-dns",
+            helperArguments: [service]
+        )
         recordEvent("DNS servers for '\(service)' reset to DHCP defaults")
     }
 
     public func setCampusDNS(service: String) async throws {
         let cmd = DNSOverrideManager.makeSetCampusDNSCommand(service: service)
-        if PrivilegeHelper.isRoot {
-            _ = try await ShellCommand.run(cmd[0], arguments: Array(cmd.dropFirst()))
-        } else {
-            _ = try await PrivilegeHelper.runElevated(script: cmd[0], arguments: Array(cmd.dropFirst()))
-        }
+        try await executePrivileged(
+            command: cmd,
+            daemonAction: .setCampusDNS,
+            helperArguments: [service]
+        )
         recordEvent("DNS servers for '\(service)' configured to campus resolvers 10.4.20.21, 10.4.20.222")
     }
 
@@ -114,50 +254,46 @@ public final class RepairRoutines: @unchecked Sendable {
 
     public func disableIPv6(service: String) async throws {
         let cmd = IPv6Manager.makeDisableIPv6Command(service: service)
-        if PrivilegeHelper.isRoot {
-            _ = try await ShellCommand.run(cmd[0], arguments: Array(cmd.dropFirst()))
-        } else {
-            do {
-                _ = try await PrivilegeHelper.runElevated(script: cmd[0], arguments: Array(cmd.dropFirst()))
-            } catch PrivilegeError.elevationDenied {
-                throw PrivilegeError.elevationDenied
-            } catch {
-                _ = try? await PrivilegeHelper.runHelper(action: "disable-ipv6", arguments: [service])
-            }
-        }
+        try await executePrivileged(
+            command: cmd,
+            daemonAction: .disableIPv6,
+            helperAction: "disable-ipv6",
+            helperArguments: [service]
+        )
         recordEvent("IPv6 disabled on service '\(service)' to eliminate Happy Eyeballs latency")
     }
 
     public func enableIPv6(service: String) async throws {
         let cmd = IPv6Manager.makeEnableIPv6AutomaticCommand(service: service)
-        if PrivilegeHelper.isRoot {
-            _ = try await ShellCommand.run(cmd[0], arguments: Array(cmd.dropFirst()))
-        } else {
-            _ = try await PrivilegeHelper.runElevated(script: cmd[0], arguments: Array(cmd.dropFirst()))
-        }
+        try await executePrivileged(
+            command: cmd,
+            daemonAction: .enableIPv6,
+            helperArguments: [service]
+        )
         recordEvent("IPv6 restored to Automatic on service '\(service)'")
     }
 
     // MARK: - Proxy Cleaner
 
     public func cleanProxies(service: String) async throws {
-        let cmd1 = ProxySettingsManager.makeDisableAutoProxyCommand(service: service)
-        let cmd2 = ProxySettingsManager.makeDisableWebProxyCommand(service: service)
-        let cmd3 = ProxySettingsManager.makeDisableSecureWebProxyCommand(service: service)
-
-        if PrivilegeHelper.isRoot {
-            _ = try await ShellCommand.run(cmd1[0], arguments: Array(cmd1.dropFirst()))
-            _ = try await ShellCommand.run(cmd2[0], arguments: Array(cmd2.dropFirst()))
-            _ = try await ShellCommand.run(cmd3[0], arguments: Array(cmd3.dropFirst()))
-        } else {
-            let combined = "\(cmd1.joined(separator: " ")) && \(cmd2.joined(separator: " ")) && \(cmd3.joined(separator: " "))"
-            do {
-                _ = try await PrivilegeHelper.runElevated(script: combined)
-            } catch PrivilegeError.elevationDenied {
-                throw PrivilegeError.elevationDenied
-            } catch {
-                _ = try? await PrivilegeHelper.runHelper(action: "clean-proxies", arguments: [service])
+        if executor.isRoot {
+            let cmd1 = ProxySettingsManager.makeDisableAutoProxyCommand(service: service)
+            let cmd2 = ProxySettingsManager.makeDisableWebProxyCommand(service: service)
+            let cmd3 = ProxySettingsManager.makeDisableSecureWebProxyCommand(service: service)
+            for cmd in [cmd1, cmd2, cmd3] {
+                let output = try await executor.runCommand(cmd[0], arguments: Array(cmd.dropFirst()))
+                guard output.succeeded else {
+                    throw ShellError.executionFailed(exitCode: output.exitCode, stdout: output.stdout, stderr: output.stderr)
+                }
             }
+        } else {
+            let combined = Self.makeCleanProxiesScript(service: service)
+            try await executePrivilegedScript(
+                combined,
+                daemonAction: .cleanProxies,
+                helperAction: "clean-proxies",
+                helperArguments: [service]
+            )
         }
         recordEvent("Cleaned auto-proxy PAC and web proxy settings on '\(service)'")
     }
@@ -166,42 +302,39 @@ public final class RepairRoutines: @unchecked Sendable {
 
     /// Checks if Private Relay is specifically isolated (bypassed/disabled) on the given service.
     public func isPrivateRelayIsolated(service: String) async -> Bool {
+        let bypassCmd = PrivateRelayManager.makeInspectProxyBypassCommand(service: service)
+        if let bypassOut = try? await executor.runCommand(bypassCmd[0], arguments: Array(bypassCmd.dropFirst())),
+           bypassOut.succeeded,
+           PrivateRelayManager.parsePrivateRelayBypassStatus(output: bypassOut.stdout) {
+            return true
+        }
+
         let cmd = PrivateRelayManager.makeInspectServiceProxiesCommand(service: service)
-        let output = (try? await ShellCommand.run(cmd[0], arguments: Array(cmd.dropFirst())))?.stdout ?? ""
+        let output = (try? await executor.runCommand(cmd[0], arguments: Array(cmd.dropFirst())))?.stdout ?? ""
         return PrivateRelayManager.parsePrivateRelayBypassStatus(output: output)
     }
 
     /// Disables Private Relay on the target campus service (e.g. en10) while preserving it on other adapters.
     public func isolatePrivateRelay(for service: String) async throws {
         let cmd = PrivateRelayManager.makeDisablePrivateRelayCanaryCommand(service: service)
-        if PrivilegeHelper.isRoot {
-            _ = try await ShellCommand.run(cmd[0], arguments: Array(cmd.dropFirst()))
-        } else {
-            do {
-                _ = try await PrivilegeHelper.runElevated(script: cmd[0], arguments: Array(cmd.dropFirst()))
-            } catch PrivilegeError.elevationDenied {
-                throw PrivilegeError.elevationDenied
-            } catch {
-                _ = try? await PrivilegeHelper.runHelper(action: "isolate-relay", arguments: [service])
-            }
-        }
+        try await executePrivileged(
+            command: cmd,
+            daemonAction: .isolateRelay,
+            helperAction: "isolate-relay",
+            helperArguments: [service]
+        )
         recordEvent("iCloud Private Relay isolated on '\(service)' to avoid campus portal/MTU interference")
     }
 
     /// Restores Private Relay configuration on the target service.
     public func restorePrivateRelay(for service: String) async throws {
         let cmd = PrivateRelayManager.makeRestorePrivateRelayCanaryCommand(service: service)
-        if PrivilegeHelper.isRoot {
-            _ = try await ShellCommand.run(cmd[0], arguments: Array(cmd.dropFirst()))
-        } else {
-            do {
-                _ = try await PrivilegeHelper.runElevated(script: cmd[0], arguments: Array(cmd.dropFirst()))
-            } catch PrivilegeError.elevationDenied {
-                throw PrivilegeError.elevationDenied
-            } catch {
-                _ = try? await PrivilegeHelper.runHelper(action: "restore-relay", arguments: [service])
-            }
-        }
+        try await executePrivileged(
+            command: cmd,
+            daemonAction: .restoreRelay,
+            helperAction: "restore-relay",
+            helperArguments: [service]
+        )
         recordEvent("iCloud Private Relay restored on '\(service)'")
     }
 }
@@ -313,6 +446,11 @@ public struct PrivateRelayManager: Sendable {
     /// Generates shell command to inspect whether a network service has custom proxy or resolver configurations.
     public static func makeInspectServiceProxiesCommand(service: String) -> [String] {
         ["/usr/sbin/networksetup", "-getwebproxy", service]
+    }
+
+    /// Generates shell command to inspect proxy bypass domains configured on a network service.
+    public static func makeInspectProxyBypassCommand(service: String) -> [String] {
+        ["/usr/sbin/networksetup", "-getproxybypassdomains", service]
     }
 
     /// Generates shell command to disable Apple Private Relay on a specific service by configuring localized DNS canary block.

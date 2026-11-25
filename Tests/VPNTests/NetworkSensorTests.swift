@@ -223,4 +223,56 @@ struct NetworkSensorTests {
         #expect(updatedState?.isCampusLAN == true)
         #expect(sensor.currentState.isCampusLAN == true)
     }
+
+    @Test("Ignore standalone en0 hotspot NAT alias 192.168.2.1 and bridge100 so offline Mac is disconnected")
+    func testIgnoreHotspotNATGatewayAliasOnEn0() {
+        let en0HotspotAliasOnly = NetworkInterfaceInfo(
+            bsdName: "en0",
+            displayName: "Wi-Fi",
+            ipAddresses: [IPAddress(address: "192.168.2.1", version: .v4)],
+            gateway: nil,
+            mtu: 1500,
+            isPrimary: false,
+            isUp: true
+        )
+        let bridge100 = NetworkInterfaceInfo(
+            bsdName: "bridge100",
+            displayName: "bridge100",
+            ipAddresses: [IPAddress(address: "192.168.2.1", version: .v4)],
+            gateway: nil,
+            mtu: 1500,
+            isPrimary: false,
+            isUp: true
+        )
+
+        #expect(NetworkSensor.classify(interfaces: [en0HotspotAliasOnly]) == .disconnected)
+        #expect(NetworkSensor.classify(interfaces: [bridge100]) == .disconnected)
+        #expect(NetworkSensor.classify(interfaces: [en0HotspotAliasOnly, bridge100]) == .disconnected)
+
+        // When en0 also has a real external Wi-Fi IP alongside the alias, classify externalWiFi using the real IP
+        let en0DualIP = NetworkInterfaceInfo(
+            bsdName: "en0",
+            displayName: "Wi-Fi",
+            ipAddresses: [
+                IPAddress(address: "192.168.2.1", version: .v4),
+                IPAddress(address: "192.168.1.75", version: .v4)
+            ],
+            gateway: "192.168.1.1",
+            mtu: 1500,
+            isPrimary: true,
+            isUp: true
+        )
+        let state = NetworkSensor.classify(interfaces: [en0DualIP, bridge100])
+        #expect(state == .externalWiFi(interface: "en0", ip: "192.168.1.75", gateway: "192.168.1.1", mtu: 1500))
+    }
+
+    @Test("SystemInterfaceProvider populates real MTU and active flags")
+    func testSystemInterfaceProviderRealMetrics() async {
+        let provider = SystemInterfaceProvider()
+        let ifaces = await provider.fetchInterfaces()
+        let lo0 = ifaces.first(where: { $0.bsdName == "lo0" })
+        #expect(lo0 != nil)
+        #expect(lo0?.isUp == true)
+        #expect((lo0?.mtu ?? 0) >= 1500)
+    }
 }

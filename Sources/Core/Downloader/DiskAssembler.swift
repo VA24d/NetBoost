@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public protocol DiskAssemblerProtocol: Sendable {
     func prepare(fileURL: URL, totalBytes: Int64) throws
@@ -54,6 +55,19 @@ public final class DiskAssembler: DiskAssemblerProtocol, @unchecked Sendable {
 
         let handle = try FileHandle(forUpdating: fileURL)
         if totalBytes > 0 {
+            // Attempt APFS contiguous space preallocation; ignore if declined by filesystem
+            var fstore = fstore_t(
+                fst_flags: UInt32(F_ALLOCATECONTIG),
+                fst_posmode: F_PEOFPOSMODE,
+                fst_offset: 0,
+                fst_length: off_t(totalBytes),
+                fst_bytesalloc: 0
+            )
+            if fcntl(handle.fileDescriptor, F_PREALLOCATE, &fstore) == -1 {
+                fstore.fst_flags = UInt32(F_ALLOCATEALL)
+                _ = fcntl(handle.fileDescriptor, F_PREALLOCATE, &fstore)
+            }
+
             try handle.truncate(atOffset: UInt64(totalBytes))
         }
 

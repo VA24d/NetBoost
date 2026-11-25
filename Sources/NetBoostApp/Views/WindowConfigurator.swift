@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// VisualEffectBackground provides a native AppKit behind-window translucent Liquid Glass backdrop.
+/// Wraps NSVisualEffectView for macOS window and sidebar vibrancy.
 public struct VisualEffectBackground: NSViewRepresentable {
     public var material: NSVisualEffectView.Material
     public var blendingMode: NSVisualEffectView.BlendingMode
@@ -28,8 +28,7 @@ public struct VisualEffectBackground: NSViewRepresentable {
     }
 }
 
-/// WindowConfigurator provides zero-overhead AppKit bridge customization for the root NSWindow.
-/// Enables liquid glass wallpaper translucency, hidden titlebar, and minimum window constraints.
+/// Configures native AppKit window chrome for transparent titlebar translucency and frame restoration.
 public struct WindowConfigurator: NSViewRepresentable {
     public init() {}
 
@@ -39,20 +38,22 @@ public struct WindowConfigurator: NSViewRepresentable {
             guard let window = view.window else { return }
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
+            window.titlebarSeparatorStyle = .none
+            window.toolbarStyle = .unified
             window.styleMask.insert(.fullSizeContentView)
             window.isOpaque = false
             window.backgroundColor = .clear
             window.isMovableByWindowBackground = true
+            window.collectionBehavior.insert(.fullScreenPrimary)
             window.minSize = NSSize(
                 width: GlassTheme.minWindowWidth,
                 height: GlassTheme.minWindowHeight
             )
+            window.setFrameAutosaveName("NetBoostMainWindow")
             window.hasShadow = true
         }
         return view
     }
 
-    public func updateNSView(_ nsView: NSView, context: Context) {
-        // No-op for static window configuration
-    }
+    public func updateNSView(_ nsView: NSView, context: Context) {}
 }

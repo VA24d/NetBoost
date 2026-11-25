@@ -14,12 +14,16 @@ public final class InterfaceProxyDispatcher: ProxyDispatcherProtocol, @unchecked
     private var roundRobinIndex: Int = 0
 
     private var listeners: [Int: Int32] = [:] // port -> fd
-    public private(set) var boundPorts: [Int: Int] = [:] // config port -> actual port
+    private var _boundPorts: [Int: Int] = [:] // config port -> actual port
+    public var boundPorts: [Int: Int] {
+        lock.withLock { _boundPorts }
+    }
     private var acceptTasks: [Int: Task<Void, Never>] = [:]
     private var isRunningInternal: Bool = false
 
     private var activeConns: [UUID: ProxyConnectionInfo] = [:]
     private var activeClientFds: [UUID: Int32] = [:]
+    private var activeTargetFds: [UUID: Int32] = [:]
     private var totalBytesReadCounter: Int64 = 0
     private var totalBytesWrittenCounter: Int64 = 0
 
@@ -57,11 +61,22 @@ public final class InterfaceProxyDispatcher: ProxyDispatcherProtocol, @unchecked
     }
 
     deinit {
-        let fds = lock.withLock { () -> [Int32] in
+        let (fds, clientFds, targetFds) = lock.withLock { () -> ([Int32], [Int32], [Int32]) in
             isRunningInternal = false
             let f = Array(listeners.values)
+            let c = Array(activeClientFds.values)
+            let t = Array(activeTargetFds.values)
             listeners.removeAll()
-            return f
+            activeClientFds.removeAll()
+            activeTargetFds.removeAll()
+            activeConns.removeAll()
+            return (f, c, t)
+        }
+        for fd in clientFds where fd >= 0 {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+        }
+        for fd in targetFds where fd >= 0 {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
         }
         for fd in fds where fd >= 0 {
             Darwin.close(fd)
@@ -101,7 +116,6 @@ public final class InterfaceProxyDispatcher: ProxyDispatcherProtocol, @unchecked
     // MARK: - Lifecycle
 
     public func start(ports: [Int: String] = defaultPorts) async throws {
-        // Update port configs
         lock.withLock {
             for (port, iface) in ports {
                 let mode: ProxyPortMode = (iface == "auto") ? .loadBalanced : .direct
@@ -173,7 +187,7 @@ public final class InterfaceProxyDispatcher: ProxyDispatcherProtocol, @unchecked
 
                 startedFds[port] = fd
                 lock.withLock {
-                    self.boundPorts[port] = actualPort
+                    self._boundPorts[port] = actualPort
                 }
             }
         } catch {
@@ -189,7 +203,6 @@ public final class InterfaceProxyDispatcher: ProxyDispatcherProtocol, @unchecked
             self.isRunningInternal = true
         }
 
-        // Spawn accept task for each port
         for (port, fd) in startedFds {
             let task = Task { [weak self] () -> Void in
                 guard let self = self else { return }
@@ -202,17 +215,22 @@ public final class InterfaceProxyDispatcher: ProxyDispatcherProtocol, @unchecked
     }
 
     public func stop() async throws {
-        let (fdsToClose, clientFdsToClose): ([Int32], [Int32]) = lock.withLock {
+        let (fdsToClose, clientFdsToClose, targetFdsToClose): ([Int32], [Int32], [Int32]) = lock.withLock {
             isRunningInternal = false
             let f = Array(listeners.values)
             listeners.removeAll()
             let c = Array(activeClientFds.values)
             activeClientFds.removeAll()
+            let t = Array(activeTargetFds.values)
+            activeTargetFds.removeAll()
             activeConns.removeAll()
-            return (f, c)
+            return (f, c, t)
         }
 
         for fd in clientFdsToClose where fd >= 0 {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+        }
+        for fd in targetFdsToClose where fd >= 0 {
             _ = Darwin.shutdown(fd, SHUT_RDWR)
         }
 
@@ -234,41 +252,15 @@ public final class InterfaceProxyDispatcher: ProxyDispatcherProtocol, @unchecked
     // MARK: - Accept Loop & Auto-Detection
 
     private func runAcceptLoop(port: Int, listenerFd: Int32) async {
-        while isRunning {
-            var clientAddr = sockaddr_in()
-            var clientAddrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
-
-            let clientFd = withUnsafeMutablePointer(to: &clientAddr) { ptr in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                    Darwin.accept(listenerFd, sa, &clientAddrLen)
-                }
+        while isRunning && !Task.isCancelled {
+            guard let accepted = await ProxySocketIO.acceptNext(
+                listenerFd: listenerFd,
+                isRunning: { [weak self] in self?.isRunning ?? false }
+            ) else {
+                if !isRunning || Task.isCancelled { break }
+                continue
             }
 
-            guard clientFd >= 0 else {
-                if !isRunning { break }
-                if errno == EWOULDBLOCK || errno == EAGAIN {
-                    try? await Task.sleep(nanoseconds: 20_000_000)
-                    continue
-                }
-                break
-            }
-
-            // Clear O_NONBLOCK inherited from listener so client socket has blocking I/O with timeouts
-            let clientFlags = fcntl(clientFd, F_GETFL, 0)
-            _ = fcntl(clientFd, F_SETFL, clientFlags & ~O_NONBLOCK)
-
-            var one: Int32 = 1
-            setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-
-            var tv = timeval(tv_sec: 15, tv_usec: 0)
-            setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-            setsockopt(clientFd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-
-            let clientIP = String(cString: inet_ntoa(clientAddr.sin_addr))
-            let clientPort = Int(UInt16(bigEndian: clientAddr.sin_port))
-            let clientDesc = "\(clientIP):\(clientPort)"
-
-            // Determine target interface
             let assignedInterface: String
             let cfg = lock.withLock { portConfigs[port] }
             if cfg?.mode == .loadBalanced {
@@ -279,8 +271,8 @@ public final class InterfaceProxyDispatcher: ProxyDispatcherProtocol, @unchecked
 
             Task { [weak self] in
                 await self?.handleIncomingConnection(
-                    clientFd: clientFd,
-                    clientDesc: clientDesc,
+                    clientFd: accepted.clientFd,
+                    clientDesc: accepted.clientDesc,
                     port: port,
                     assignedInterface: assignedInterface
                 )
@@ -294,11 +286,24 @@ public final class InterfaceProxyDispatcher: ProxyDispatcherProtocol, @unchecked
         port: Int,
         assignedInterface: String
     ) async {
-        // Peek at first incoming byte to autodetect protocol
-        var firstByte: UInt8 = 0
-        let peekCount = recv(clientFd, &firstByte, 1, MSG_PEEK)
+        // Peek at first incoming byte on a GCD worker thread to autodetect protocol
+        let firstByteOpt: UInt8? = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                var firstByte: UInt8 = 0
+                var peekCount: Int
+                repeat {
+                    peekCount = recv(clientFd, &firstByte, 1, MSG_PEEK)
+                } while peekCount < 0 && errno == EINTR
 
-        guard peekCount == 1 else {
+                if peekCount == 1 {
+                    continuation.resume(returning: firstByte)
+                } else {
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+
+        guard let firstByte = firstByteOpt else {
             Darwin.close(clientFd)
             return
         }
@@ -306,7 +311,6 @@ public final class InterfaceProxyDispatcher: ProxyDispatcherProtocol, @unchecked
         let connId = UUID()
 
         if firstByte == 0x05 {
-            // SOCKS5 Protocol
             let connInfo = ProxyConnectionInfo(
                 id: connId,
                 port: port,
@@ -324,18 +328,29 @@ public final class InterfaceProxyDispatcher: ProxyDispatcherProtocol, @unchecked
                 lock.withLock {
                     _ = activeConns.removeValue(forKey: connId)
                     _ = activeClientFds.removeValue(forKey: connId)
+                    _ = activeTargetFds.removeValue(forKey: connId)
                 }
             }
 
             let socks5 = SOCKS5Server(port: port, targetInterface: assignedInterface)
-            await socks5.handleClient(clientFd: clientFd, clientDesc: clientDesc, interface: assignedInterface)
-
-            lock.withLock {
-                totalBytesReadCounter += socks5.totalBytesRead
-                totalBytesWrittenCounter += socks5.totalBytesWritten
-            }
+            await socks5.handleClient(
+                clientFd: clientFd,
+                clientDesc: clientDesc,
+                interface: assignedInterface,
+                onTargetConnected: { [weak self] targetHost, targetPort, protoType, targetFd in
+                    self?.updateConnectionTarget(
+                        connId: connId,
+                        targetHost: targetHost,
+                        targetPort: targetPort,
+                        protocolType: protoType,
+                        targetFd: targetFd
+                    )
+                },
+                onBytesTransferred: { [weak self] deltaRead, deltaWritten in
+                    self?.recordBytes(connId: connId, readDelta: deltaRead, writeDelta: deltaWritten)
+                }
+            )
         } else if firstByte >= 0x20 && firstByte <= 0x7E {
-            // HTTP / HTTPS CONNECT Protocol
             let connInfo = ProxyConnectionInfo(
                 id: connId,
                 port: port,
@@ -353,19 +368,67 @@ public final class InterfaceProxyDispatcher: ProxyDispatcherProtocol, @unchecked
                 lock.withLock {
                     _ = activeConns.removeValue(forKey: connId)
                     _ = activeClientFds.removeValue(forKey: connId)
+                    _ = activeTargetFds.removeValue(forKey: connId)
                 }
             }
 
             let http = HTTPProxyServer(port: port, targetInterface: assignedInterface)
-            await http.handleClient(clientFd: clientFd, clientDesc: clientDesc, interface: assignedInterface)
-
-            lock.withLock {
-                totalBytesReadCounter += http.totalBytesRead
-                totalBytesWrittenCounter += http.totalBytesWritten
-            }
+            await http.handleClient(
+                clientFd: clientFd,
+                clientDesc: clientDesc,
+                interface: assignedInterface,
+                onTargetConnected: { [weak self] targetHost, targetPort, protoType, targetFd in
+                    self?.updateConnectionTarget(
+                        connId: connId,
+                        targetHost: targetHost,
+                        targetPort: targetPort,
+                        protocolType: protoType,
+                        targetFd: targetFd
+                    )
+                },
+                onBytesTransferred: { [weak self] deltaRead, deltaWritten in
+                    self?.recordBytes(connId: connId, readDelta: deltaRead, writeDelta: deltaWritten)
+                }
+            )
         } else {
             // Unsupported binary protocol (e.g. SOCKS4 or garbage)
             Darwin.close(clientFd)
+        }
+    }
+
+    private func updateConnectionTarget(
+        connId: UUID,
+        targetHost: String,
+        targetPort: Int,
+        protocolType: ProxyProtocolType,
+        targetFd: Int32
+    ) {
+        lock.withLock {
+            activeTargetFds[connId] = targetFd
+            if let existing = activeConns[connId] {
+                activeConns[connId] = ProxyConnectionInfo(
+                    id: existing.id,
+                    port: existing.port,
+                    clientAddress: existing.clientAddress,
+                    targetHost: targetHost,
+                    targetPort: targetPort,
+                    egressInterface: existing.egressInterface,
+                    protocolType: protocolType,
+                    bytesRead: existing.bytesRead,
+                    bytesWritten: existing.bytesWritten,
+                    startTime: existing.startTime
+                )
+            }
+        }
+    }
+
+    private func recordBytes(connId: UUID, readDelta: Int64, writeDelta: Int64) {
+        lock.withLock {
+            totalBytesReadCounter += readDelta
+            totalBytesWrittenCounter += writeDelta
+            if let existing = activeConns[connId] {
+                activeConns[connId] = ProxySocketIO.makeUpdatedConnectionInfo(existing, readDelta: readDelta, writeDelta: writeDelta)
+            }
         }
     }
 }

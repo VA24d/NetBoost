@@ -1,88 +1,77 @@
-# NetBoost: Native macOS Network Controller & Accelerator Architecture
+# NetBoost architecture
 
-**Target Location:** `/Users/va/NetBoost`  
-**Platform:** macOS 15+ / 26+ (Apple Silicon & Intel)  
-**UI Paradigm:** Liquid Glass Native macOS UI (SwiftUI with vibrancy, frosted glass material, ultra-thin vibrancy, dynamic gradients, SF Symbols 6)
+NetBoost splits core engines, desktop UI, and root tools across three Swift 6 targets. The package builds with Swift Package Manager for macOS 14 and newer.
 
----
+## Package targets
 
-## 1. Feature Specifications & Requirements
+```text
+NetBoostCore    Sources/Core            Headless networking, parsers, diagnostics, downloader, privilege client
+NetBoostApp     Sources/NetBoostApp     SwiftUI window, menu bar popover, and @MainActor AppState
+NetBoostHelper  Sources/NetBoostHelper  Root LaunchDaemon at /Library/LaunchDaemons/com.netboost.helper.plist
+NetBoostTests   Tests                   Swift Testing unit, mock, and Tier 1 to Tier 5 suites
+```
 
-### A. 802.1X Hotspot Sharing for iPad & Secondary Devices
-* **Core Problem:** Campus 802.1X (PEAP-MSCHAPv2 / RADIUS) requires individual credentials, periodic re-authentication, and often fails or is unsupported on streaming devices, micro-controllers, or secondary tablets.
-* **Feature:**
-  * One-click AP Hotspot broadcast on internal Wi-Fi (\`en0\`) while consuming incoming authenticated Internet from Wired Ethernet (\`en10\`).
-  * Dedicated NAT subnet forwarding (\`192.168.2.1/24\`) with DHCP and DNS forwarding.
-  * Real-time client discovery table showing connected iPads/devices, assigned IP, MAC address, and active throughput.
+## File structure
 
-### B. Network-Aware .ovpn Profiles (Context-Sensitive VPN Rule Engine)
-* **Core Problem:** Running campus split-VPNs (\`iiit-split.ovpn\`) while physically plugged into campus Ethernet (\`10.1.36.0/22\`) corrupts routing tables, duplicates routes, and creates conflicts with the local gateway. However, when switching to external Wi-Fi / iPhone hotspot, the VPN is necessary to reach \`turing\` and campus intranet.
-* **Feature:**
-  * **Network Trigger Automation:**
-    * **Campus Wired (\`en10\` active with \`10.1.x.x\`):** Automatically disengage / disable \`iiit-split.ovpn\`.
-    * **External Wi-Fi / Hotspot (\`en0\` / \`en9\` active with \`172.20.10.x\` or public IP):** Automatically activate \`iiit-split.ovpn\` or \`macos.ovpn\`.
-  * Integrated OpenVPN control engine to connect/disconnect profiles without manual Passepartout intervention.
+```text
+Sources/
+├── Core/
+│   ├── AIBridge/       LLMDoctorBridge.swift, TelemetryExporter.swift, ToolSchema.swift
+│   ├── Diagnostics/    CampusDoctor.swift, CaptivePortalDetector.swift, LatencyProbe.swift,
+│   │                   MTUManager.swift, RepairRoutines.swift, ServiceOrderManager.swift
+│   ├── Downloader/     DownloadManager.swift, RangeProbe.swift, ChunkPartitionEngine.swift,
+│   │                   ChunkWorker.swift, DiskAssembler.swift, ChecksumValidator.swift, ClipboardWatcher.swift
+│   ├── Hotspot/        HotspotNATController.swift, DHCPServer.swift, DNSProxy.swift, ARPScanner.swift
+│   ├── Models/         AcceleratorModels.swift, DiagnosticModels.swift, HotspotModels.swift,
+│   │                   InterfaceModels.swift, ProxyModels.swift, VPNModels.swift
+│   ├── NetworkEngine/  InterfaceProxyDispatcher.swift, SOCKS5Server.swift, HTTPProxyServer.swift,
+│   │                   RoutePinningEngine.swift, ShellEnvGenerator.swift
+│   ├── System/         PrivilegeHelper.swift, HelperProtocol.swift, DarwinSocketHelper.swift, ShellCommand.swift
+│   └── VPN/            NetworkSensor.swift, VPNRuleEngine.swift, PassepartoutController.swift,
+│                       OpenVPNParser.swift, RouteConflictDetector.swift
+├── NetBoostApp/
+│   ├── App/            NetBoostApp.swift and modular AppState extension files
+│   ├── Theme/          GlassTheme.swift
+│   └── Views/          MainWindowView.swift, HeaderBarView.swift, MenuBarPopupView.swift,
+│                       WindowConfigurator.swift, DashboardView.swift, HotspotView.swift,
+│                       DispatcherView.swift, VPNView.swift, AcceleratorView.swift,
+│                       DoctorView.swift, AIDoctorView.swift
+└── NetBoostHelper/
+    └── main.swift
 
-### C. Per-App and Per-Job Routing (Intelligent Dispatcher)
-* **Core Problem:** Computational tasks (e.g., HPC jobs on \`turing.iiit.ac.in\`, Claude coding sessions, SSH clusters) require the low-latency direct LAN path (\`en10\`), while general web browsing or media streaming might need the phone hotspot or a bonded channel.
-* **Feature:**
-  * **Destination-Based Pinned Routes:** Pinned rules for subnets (\`10.8.0.0/16\` for Turing/HPC, \`10.4.0.0/16\` for Campus servers) forced through \`en10\`.
-  * **Local Multi-Interface Proxy (SOCKS5/HTTP):**
-    * Port \`1080\` (Direct Wired LAN bound)
-    * Port \`1081\` (Direct Mobile Hotspot bound)
-    * Port \`1082\` (Bonded / Load-Balanced multi-interface)
-  * Any CLI tool, Python script, or AI assistant session can be assigned to an interface via environment variable: \`ALL_PROXY=socks5://127.0.0.1:1080 <command>\`.
+Scripts/                build.sh, run_tests.sh, package_dmg.sh, netboost-helper.sh,
+                        empty.modulemap, empty.swiftoverlay, testing_foundation.modulemap
+Tests/                  AppTests/, CoreTests/, DiagnosticsTests/, DownloaderTests/, LLMBridgeTests/,
+                        MockVerificationTests/, ProxyTests/, VPNTests/, E2ETests/Tier1..Tier5/,
+                        Mocks/, Fixtures/, Helpers/
+```
 
-### D. Multi-Connection Download Accelerator
-* **Core Problem:** Campus traffic shapers enforce a ~40 Mbps limit *per TCP stream*.
-* **Feature:**
-  * High-performance segmented download manager splitting target files into 8–16 simultaneous TCP chunks.
-  * Native Swift concurrency (\`async/await\`, \`URLSession\` range requests \`bytes=start-end\`).
-  * Real-time per-chunk progress meters, automatic file assembly, and clipboard download monitor.
+## Subsystems
 
-### E. Campus Network Diagnostics & Auto-Repair
-* **Core Problem:** Frequent issues on college networks: stale DNS caches, hardcoded public DNS breaking intranet lookups, IPv6 timeout hangs ("Happy Eyeballs" fallback adding 500ms delay), and gateway drops.
-* **Feature:**
-  * One-click "Doctor / Auto-Fix":
-    * Flushes mDNSResponder cache.
-    * Sets campus DNS (\`10.4.20.21\`, \`10.4.20.222\`) first and cleans corrupted overrides.
-    * Disables unrouted IPv6 stack on LAN to eliminate the 500ms connection delay.
-    * Verifies reachability to \`turing.iiit.ac.in\`, gateway, and external WAN.
+### Privilege boundary (`PrivilegeHelper` and `NetBoostHelper`)
 
-### F. Network Preference Ordering & Dynamic Failover
-* **Feature:**
-  * In-app drag-and-drop or one-click service order prioritization (e.g., Wired LAN #1, Wi-Fi #2, etc.).
-  * Real-time interface watcher (\`NWPathMonitor\`) detecting cable plugging/unplugging and instantaneously adjusting routing rules.
+1. `PrivilegeHelper` pings `/var/run/netboost/helper.sock` and compares the bundled `NetBoostHelper` SHA-256 hash with `/Library/PrivilegedHelperTools/com.netboost.helper`.
+2. If the daemon is absent or outdated, one `osascript` admin prompt installs the binary. That setup also saves the calling UID under `/Library/Application Support/NetBoost/authorized_uid` and bootstraps the LaunchDaemon.
+3. On each request, `NetBoostHelper` checks the client UID with `LOCAL_PEERCRED` (`xucred`) before reading payload bytes. Validated `HelperAction` requests run system binaries via Foundation `Process` without `/bin/sh`.
 
----
+### Proxy dispatcher and static routes
 
-## 2. Liquid Glass UI Design Specs
+`InterfaceProxyDispatcher` listens on `127.0.0.1` ports `1080`, `1081`, and `1082`. Peeking the first byte selects SOCKS5 (`SOCKS5Server`) or HTTP CONNECT (`HTTPProxyServer`). Upstream sockets bind via `IP_BOUND_IF` or `IPV6_BOUND_IF`, clear read timeouts once relaying begins, and count transferred bytes. `RoutePinningEngine` parses `netstat -rn` and runs `route add` or `route delete` for pinned subnets.
 
-* **Window Material:** Full-size content view with \`.background(.ultraThinMaterial)\` and \`.windowStyle(.hiddenTitleBar)\`.
-* **Visual Palette:** Deep dark mode with subtle neon accent glows (sapphire blue for LAN, emerald green for Active Hotspot, purple for Accelerator).
-* **Components:**
-  1. **Top Glass Header:** Live aggregated throughput (DL/UL speedometers) + quick "Auto-Fix Campus Network" button.
-  2. **Sidebar Glass Tabs:**
-     * **Dashboard / Status:** Live topology graph (Mac -> Wired / Wi-Fi -> Hotspot -> iPad).
-     * **Hotspot Sharing:** Broadcast toggle, SSID, Password, Connected Clients list.
-     * **Accelerator:** Multi-thread download queue, segmented chunk visualizers.
-     * **Smart Routing & VPN:** Per-app rules, \`.ovpn\` automation rules, interface priority reordering.
-     * **Campus Diagnostics:** Latency meters to Turing, Gateway, and Internet.
-  3. **Menu Bar Extra:** Sleek mini-menu with one-click Hotspot toggle and live bandwidth rate in the macOS status bar.
+### Hotspot NAT (`HotspotNATController`)
 
----
+`HotspotNATController` writes rules into the `netboost` and `com.apple/netboost` PF anchor files and checks syntax with `pfctl -nf`. It imports `com.apple.nat` XML plists validated by `plutil -lint`. If `bridge100` already controls `en0`, setup skips the alias step. Connected devices come from `/var/db/dhcpd_leases` merged with `ARPScanner` results.
 
-## 3. Implementation Breakdown & Subagent Workflow
+### VPN automation (`NetworkSensor` and `PassepartoutController`)
 
-### Subagent Responsibilities:
-1. **Subagent 1 (Network & NAT Sharing):**
-   * Implement hotspot bridging scripts and Swift wrappers using \`sysctl\`, \`pfctl\`, \`nat\`, and \`scutil\`.
-   * Create network health & DNS diagnostic repair utilities.
-2. **Subagent 2 (Download Accelerator Engine):**
-   * Write high-performance parallel chunk downloading module in Swift with byte-range requests and checksum verification.
-3. **Subagent 3 (Proxy Dispatcher & VPN Automator):**
-   * Implement the local multi-interface SOCKS5/HTTP dispatcher (\`NWParameters.requiredInterface\`) and \`.ovpn\` condition engine.
-4. **Subagent 4 (Liquid Glass Native UI):**
-   * Build the complete SwiftUI app with glassmorphism materials, custom cards, live gauges, and menu bar accessory.
-5. **Subagent 5 (Build & Verification):**
-   * Compile the project using \`swiftc\` / Swift Package Manager, test runtime commands, test hotspot NAT routing tables, and verify accelerator throughput.
+`NetworkSensor` merges `NWPathMonitor` callbacks with `getifaddrs` metadata and ignores `bridge100` and hotspot aliases. That classifier detects campus Ethernet, cellular hotspots, external Wi-Fi, or offline state. `VPNRuleEngine`, `PassepartoutController`, and `RouteConflictDetector` control `scutil --nc` services. Imported `.ovpn` files are also checked against physical LAN interfaces for route overlap.
+
+### Downloader, diagnostics, and AI bridge
+
+`DownloadManager` coordinates `RangeProbe`, `ChunkPartitionEngine`, `ChunkWorker`, `DiskAssembler`, and `ChecksumValidator`. Workers stream HTTP byte ranges in 64 KB buffers, keeping memory flat.
+
+`CampusDoctor` runs `RepairRoutines`, `MTUManager`, `ServiceOrderManager`, `LatencyProbe`, and `CaptivePortalDetector`. Repair commands quote multi-word service names safely. Separately, `LLMDoctorBridge` queries `/v1/models` and `/v1/chat/completions` on LM Studio. Proposed tool calls wait for user approval.
+
+### Desktop UI (`NetBoostApp`)
+
+`MainWindowView` renders a translucent sidebar (`Cmd+1` to `Cmd+7`). In the top bar, `HeaderBarView` shows live throughput and helper status, while `MenuBarPopupView` shows quick toggles. `GlassTheme` sets dark color tokens and a 920 by 600 point minimum frame. Reduced transparency swaps blur layers for solid fills.

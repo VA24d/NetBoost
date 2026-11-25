@@ -71,4 +71,54 @@ struct DarwinSocketHelperTests {
             try DarwinSocketHelper.bindSocket(fd: fd, toInterface: fakeIfName)
         }
     }
+
+    @Test("Query interface MTU via SIOCGIFMTU and verify loopback MTU")
+    func testGetInterfaceMTU() {
+        let loMTU = DarwinSocketHelper.getInterfaceMTU("lo0")
+        #expect(loMTU != nil)
+        #expect((loMTU ?? 0) >= 1500)
+
+        #expect(DarwinSocketHelper.getInterfaceMTU("non_existent_if_xyz_99") == nil)
+        #expect(DarwinSocketHelper.getInterfaceMTU("") == nil)
+    }
+
+    @Test("Extract hardware MAC address from AF_LINK sockaddr_dl")
+    func testGetInterfaceMACAddress() {
+        // lo0 has no 6-byte Ethernet MAC
+        #expect(DarwinSocketHelper.getInterfaceMACAddress("lo0") == nil)
+        #expect(DarwinSocketHelper.getInterfaceMACAddress("non_existent_if_xyz_99") == nil)
+
+        // en0 exists on macOS machines and has a 6-octet colon-separated MAC
+        if DarwinSocketHelper.getInterfaceIndex(for: "en0") != nil,
+           let mac = DarwinSocketHelper.getInterfaceMACAddress("en0") {
+            let octets = mac.split(separator: ":")
+            #expect(octets.count == 6)
+            #expect(octets.allSatisfy { $0.count == 2 })
+        }
+    }
+
+    @Test("Check interface active flags and parse default gateways from netstat output")
+    func testInterfaceActiveAndDefaultGateways() {
+        #expect(DarwinSocketHelper.isInterfaceActive("lo0") == true)
+        #expect(DarwinSocketHelper.isInterfaceActive("non_existent_if_xyz_99") == false)
+
+        let sampleNetstat = """
+        Routing tables
+
+        Internet:
+        Destination        Gateway            Flags               Netif Expire
+        default            10.1.36.1          UGScg                en10
+        default            192.168.1.1        UGScIg                en0
+        default            link#14            UCSIg               utun4
+        10.1.36/22         link#13            UCS                  en10
+        """
+
+        let gateways = DarwinSocketHelper.parseDefaultGateways(from: sampleNetstat)
+        #expect(gateways["en10"] == "10.1.36.1")
+        #expect(gateways["en0"] == "192.168.1.1")
+        #expect(gateways["utun4"] == nil)
+
+        // Verify live getDefaultGateways call returns cleanly without crashing
+        _ = DarwinSocketHelper.getDefaultGateways()
+    }
 }

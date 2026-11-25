@@ -190,6 +190,58 @@ struct InterfaceProxyDispatcherTests {
             _ = Darwin.shutdown(clientFd, SHUT_RDWR)
         }
 
+        // 3. Verify live activeConnections metrics (targetHost, targetPort, bytesRead, bytesWritten)
+        do {
+            let serverReply = Data(repeating: 0x5A, count: 256)
+            let asymmetricTarget = MockSOCKS5TargetServer(mode: .fixedData(serverReply))
+            let asymPort = try await asymmetricTarget.start()
+            defer { asymmetricTarget.stop() }
+
+            let clientFd = socket(AF_INET, SOCK_STREAM, 0)
+            defer { Darwin.close(clientFd) }
+            var one: Int32 = 1
+            setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+
+            var addr = sockaddr_in()
+            addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = in_port_t(testPort).bigEndian
+            addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+
+            let connRes = withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                    Darwin.connect(clientFd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            #expect(connRes == 0)
+
+            let httpReq = "CONNECT 127.0.0.1:\(asymPort) HTTP/1.1\r\nHost: 127.0.0.1:\(asymPort)\r\n\r\n"
+            _ = Data(httpReq.utf8).withUnsafeBytes { Darwin.write(clientFd, $0.baseAddress!, httpReq.utf8.count) }
+            var respBuf = [UInt8](repeating: 0, count: 128)
+            _ = Darwin.read(clientFd, &respBuf, respBuf.count)
+
+            let clientSend = Data(repeating: 0x11, count: 32)
+            _ = clientSend.withUnsafeBytes { Darwin.write(clientFd, $0.baseAddress!, clientSend.count) }
+
+            var echoRecv = Data()
+            var buf = [UInt8](repeating: 0, count: 256)
+            while echoRecv.count < 256 {
+                let n = Darwin.read(clientFd, &buf, buf.count)
+                if n <= 0 { break }
+                echoRecv.append(buf, count: n)
+            }
+            #expect(echoRecv.count == 256)
+
+            let liveUpdated = try await TestAssertions.pollUntil(timeout: 2.0) {
+                guard let conn = dispatcher.activeConnections.first(where: { $0.targetPort == Int(asymPort) }) else {
+                    return false
+                }
+                return conn.targetHost == "127.0.0.1" && conn.bytesRead == 32 && conn.bytesWritten == 256
+            }
+            #expect(liveUpdated)
+            _ = Darwin.shutdown(clientFd, SHUT_RDWR)
+        }
+
         try await dispatcher.stop()
         #expect(dispatcher.isRunning == false)
     }

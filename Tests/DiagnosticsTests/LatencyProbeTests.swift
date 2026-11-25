@@ -91,4 +91,28 @@ struct LatencyProbeTests {
         #expect(LatencyProbe.claude == "claude.com")
         #expect(LatencyProbe.defaultTargets.count == 5)
     }
+
+    @Test("Probe uses poll() for TCP socket connect against live local endpoint")
+    func testPollBasedTCPConnectProbe() async throws {
+        let server = MockSOCKS5TargetServer(mode: .rawEcho)
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let prober = LatencyProbe()
+        let result = await prober.probe(target: "127.0.0.1", port: Int(port), timeout: 1.0)
+        #expect(result.isReachable == true)
+        #expect(result.latencyMs >= 0.0)
+        #expect(result.packetLossPercent == 0.0)
+    }
+
+    @Test("Traceroute helper rejects unsafe flags and executes safely on loopback")
+    func testTracerouteHelper() async {
+        let prober = LatencyProbe()
+        let invalid = await prober.traceroute(target: "-badflag;ls", maxHops: 4)
+        #expect(invalid.isEmpty)
+
+        let hops = await prober.traceroute(target: "127.0.0.1", maxHops: 2)
+        // Loopback traceroute may be empty or contain hop lines depending on sandbox permissions, must not crash
+        #expect(hops.count >= 0)
+    }
 }

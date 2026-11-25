@@ -43,6 +43,10 @@ public final class MockAppVPNController: VPNControllerProtocol, @unchecked Senda
     public var shouldThrowError = false
     public var mockStatus: VPNStatus = .disconnected
     public var mockConflicts: [String] = []
+    public var mockParsedProfile: VPNProfileInfo?
+    public var parseShouldThrowError = false
+    public var lastConflictCheckedProfile: VPNProfileInfo?
+    public var lastConflictCheckedLAN: String?
 
     public init() {}
 
@@ -66,11 +70,16 @@ public final class MockAppVPNController: VPNControllerProtocol, @unchecked Senda
     }
 
     public func parseProfile(url: URL) throws -> VPNProfileInfo {
-        VPNProfileInfo(name: "macos.ovpn", serverAddress: "vpn.campus.net")
+        if parseShouldThrowError {
+            throw NSError(domain: "MockVPN", code: 422, userInfo: [NSLocalizedDescriptionKey: "Invalid OpenVPN profile"])
+        }
+        return mockParsedProfile ?? VPNProfileInfo(name: "macos.ovpn", serverAddress: "vpn.campus.net")
     }
 
     public func detectConflicts(profile: VPNProfileInfo, currentLAN: String) -> [String] {
-        mockConflicts
+        lastConflictCheckedProfile = profile
+        lastConflictCheckedLAN = currentLAN
+        return mockConflicts
     }
 }
 
@@ -246,23 +255,50 @@ public final class MockAppHotspotController: HotspotControllerProtocol, @uncheck
 // MARK: - Mock LLM Doctor Bridge
 
 public final class MockAppLLMDoctorBridge: LLMDoctorBridgeProtocol, @unchecked Sendable {
+    private let lock = NSLock()
     public var telemetrySent = false
+    public var sendChatCalled = false
+    public var lastChatMessage: String?
+    public var lastChatReport: NetworkTelemetryReport?
+    public var lastChatEndpoint: URL?
     public var executedTools: [String] = []
+    public var appendedToolResults: [(toolCallId: String, name: String, output: String)] = []
     public var shouldThrowError = false
     public var mockAnalysis = LLMAnalysis(diagnosis: "Network optimal", recommendedActions: [])
 
     public init() {}
 
     public func sendTelemetry(report: NetworkTelemetryReport, endpoint: URL) async throws -> LLMAnalysis {
-        if shouldThrowError {
+        let (fail, analysis) = lock.withLock { (shouldThrowError, mockAnalysis) }
+        if fail {
             throw NSError(domain: "MockLLM", code: 500, userInfo: [NSLocalizedDescriptionKey: "LLM bridge offline"])
         }
-        telemetrySent = true
-        return mockAnalysis
+        lock.withLock { telemetrySent = true }
+        return analysis
+    }
+
+    public func sendChat(message: String, report: NetworkTelemetryReport?, endpoint: URL) async throws -> LLMAnalysis {
+        let (fail, analysis) = lock.withLock { (shouldThrowError, mockAnalysis) }
+        if fail {
+            throw NSError(domain: "MockLLM", code: 500, userInfo: [NSLocalizedDescriptionKey: "LLM bridge offline"])
+        }
+        lock.withLock {
+            sendChatCalled = true
+            lastChatMessage = message
+            lastChatReport = report
+            lastChatEndpoint = endpoint
+        }
+        return analysis
+    }
+
+    public func appendToolResult(toolCallId: String, name: String, output: String) {
+        lock.withLock {
+            appendedToolResults.append((toolCallId: toolCallId, name: name, output: output))
+        }
     }
 
     public func executeTool(name: String, arguments: [String: Any]) async throws -> ToolResult {
-        executedTools.append(name)
+        lock.withLock { executedTools.append(name) }
         return ToolResult(toolName: name, success: true, output: "Successfully executed \(name)")
     }
 }
@@ -270,7 +306,11 @@ public final class MockAppLLMDoctorBridge: LLMDoctorBridgeProtocol, @unchecked S
 // MARK: - Mock Clipboard Watcher
 
 public final class MockAppClipboardWatcher: ClipboardWatcherProtocol, @unchecked Sendable {
+    private let lock = NSLock()
     public var isEnabled: Bool = true
+    public var startMonitoringCalled = false
+    public var stopMonitoringCalled = false
+    public var lastMonitoringInterval: TimeInterval?
     private var continuation: AsyncStream<URL>.Continuation?
     public let detectedURLs: AsyncStream<URL>
 
@@ -290,6 +330,152 @@ public final class MockAppClipboardWatcher: ClipboardWatcherProtocol, @unchecked
         URL(string: text)
     }
 
-    public func startMonitoring(interval: TimeInterval = 1.0) {}
-    public func stopMonitoring() {}
+    public func startMonitoring(interval: TimeInterval = 1.0) {
+        lock.withLock {
+            startMonitoringCalled = true
+            lastMonitoringInterval = interval
+        }
+    }
+
+    public func stopMonitoring() {
+        lock.withLock {
+            stopMonitoringCalled = true
+        }
+    }
+}
+
+// MARK: - Mock Network Sensor Providers & Route Pinning Test Harness
+
+public final class MockAppPathMonitor: PathMonitorProtocol, @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (@Sendable (NetworkPathSnapshot) -> Void)?
+    public var isStarted = false
+    public var isCancelled = false
+    private var _currentPath: NetworkPathSnapshot
+
+    public var currentPath: NetworkPathSnapshot {
+        lock.withLock { _currentPath }
+    }
+
+    public init(
+        initialPath: NetworkPathSnapshot = NetworkPathSnapshot(
+            status: .satisfied,
+            availableInterfaceNames: ["en10", "en0"],
+            primaryInterfaceType: .wiredEthernet
+        )
+    ) {
+        self._currentPath = initialPath
+    }
+
+    public func start(onUpdate: @escaping @Sendable (NetworkPathSnapshot) -> Void) {
+        let initial = lock.withLock { () -> NetworkPathSnapshot in
+            isStarted = true
+            handler = onUpdate
+            return _currentPath
+        }
+        onUpdate(initial)
+    }
+
+    public func cancel() {
+        lock.withLock {
+            isCancelled = true
+            handler = nil
+        }
+    }
+}
+
+public final class MockAppInterfaceProvider: NetworkInterfaceProvider, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _interfaces: [NetworkInterfaceInfo]
+
+    public init(interfaces: [NetworkInterfaceInfo] = []) {
+        self._interfaces = interfaces
+    }
+
+    public func fetchInterfaces() async -> [NetworkInterfaceInfo] {
+        lock.withLock { _interfaces }
+    }
+}
+
+@MainActor
+public struct AppStateTestHarness {
+    public let proxy: MockAppProxyDispatcher
+    public let vpn: MockAppVPNController
+    public let downloader: MockAppDownloadManager
+    public let doctor: MockAppCampusDoctor
+    public let hotspot: MockAppHotspotController
+    public let llm: MockAppLLMDoctorBridge
+    public let clipboard: MockAppClipboardWatcher
+    public let pathMonitor: MockAppPathMonitor
+    public let interfaceProvider: MockAppInterfaceProvider
+    public let networkSensor: NetworkSensor
+    public let routePinningEngine: RoutePinningEngine
+    public let appState: AppState
+
+    public init(
+        startBackgroundTimers: Bool = false,
+        gateway: String = RoutePinningEngine.defaultGateway,
+        interface: String = RoutePinningEngine.defaultInterface,
+        initialEnvironment: NetworkEnvironmentState = .defaultCampusLAN,
+        interfaces: [NetworkInterfaceInfo] = []
+    ) {
+        self.proxy = MockAppProxyDispatcher()
+        self.vpn = MockAppVPNController()
+        self.downloader = MockAppDownloadManager()
+        self.doctor = MockAppCampusDoctor()
+        self.hotspot = MockAppHotspotController()
+        self.llm = MockAppLLMDoctorBridge()
+        self.clipboard = MockAppClipboardWatcher()
+        self.pathMonitor = MockAppPathMonitor()
+        self.interfaceProvider = MockAppInterfaceProvider(interfaces: interfaces)
+        self.networkSensor = NetworkSensor(
+            pathMonitor: pathMonitor,
+            interfaceProvider: interfaceProvider,
+            debounceInterval: 0.01,
+            initialState: initialEnvironment
+        )
+        self.routePinningEngine = Self.makeRoutePinningEngine(gateway: gateway, interface: interface)
+        self.appState = AppState(
+            proxyDispatcher: proxy,
+            vpnController: vpn,
+            downloadManager: downloader,
+            campusDoctor: doctor,
+            hotspotController: hotspot,
+            llmBridge: llm,
+            pasteboardWatcher: clipboard,
+            startBackgroundTimers: startBackgroundTimers,
+            networkSensor: networkSensor,
+            routePinningEngine: routePinningEngine
+        )
+    }
+
+    public static func makeRoutePinningEngine(
+        gateway: String = RoutePinningEngine.defaultGateway,
+        interface: String = RoutePinningEngine.defaultInterface
+    ) -> RoutePinningEngine {
+        RoutePinningEngine(gateway: gateway, interface: interface)
+    }
+
+    public static func makeCampusInterfaceFixtures() -> [NetworkInterfaceInfo] {
+        [
+            NetworkInterfaceInfo(
+                bsdName: "en10",
+                displayName: "USB 10/100 LAN",
+                ipAddresses: [IPAddress(address: "10.1.36.52", netmask: "255.255.252.0", prefixLength: 22)],
+                gateway: "10.1.36.1",
+                mtu: 1500,
+                isPrimary: true,
+                isUp: true
+            ),
+            NetworkInterfaceInfo(
+                bsdName: "en0",
+                displayName: "Wi-Fi",
+                ipAddresses: [IPAddress(address: "192.168.1.42", netmask: "255.255.255.0", prefixLength: 24)],
+                gateway: "192.168.1.1",
+                mtu: 1500,
+                isPrimary: false,
+                isUp: true
+            )
+        ]
+    }
 }

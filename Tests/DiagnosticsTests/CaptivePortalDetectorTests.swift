@@ -87,4 +87,19 @@ struct CaptivePortalDetectorTests {
         #expect(status == .notDetected)
         #expect(redirect == nil)
     }
+
+    @Test("Repeated CaptiveDetector evaluations complete cleanly without leaking sessions")
+    func testRepeatedCaptiveEvaluationsCompleteCleanly() async throws {
+        let server = MockHTTPServer()
+        server.captivePortalMode = .appleHotspotDetectSuccess
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let probeURL = URL(string: "http://127.0.0.1:\(port)/hotspot-detect.html")!
+        for _ in 0..<5 {
+            let (status, redirect) = try await CaptiveDetector.evaluate(probeURL: probeURL)
+            #expect(status == .notDetected)
+            #expect(redirect == nil)
+        }
+    }
 }

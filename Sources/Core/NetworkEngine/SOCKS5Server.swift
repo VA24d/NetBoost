@@ -173,42 +173,25 @@ public final class SOCKS5Server: @unchecked Sendable {
     // MARK: - Connection Loop
 
     private func runAcceptLoop() async {
-        while isRunning {
-            var clientAddr = sockaddr_in()
-            var clientAddrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        while isRunning && !Task.isCancelled {
+            let currentListenerFd = lock.withLock { listenerFd }
+            guard currentListenerFd >= 0 else { break }
 
-            let clientFd = withUnsafeMutablePointer(to: &clientAddr) { ptr in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                    Darwin.accept(listenerFd, sa, &clientAddrLen)
-                }
+            guard let accepted = await ProxySocketIO.acceptNext(
+                listenerFd: currentListenerFd,
+                isRunning: { [weak self] in self?.isRunning ?? false }
+            ) else {
+                if !isRunning || Task.isCancelled { break }
+                continue
             }
 
-            guard clientFd >= 0 else {
-                if !isRunning { break }
-                if errno == EWOULDBLOCK || errno == EAGAIN {
-                    try? await Task.sleep(nanoseconds: 20_000_000)
-                    continue
-                }
-                break
-            }
-
-            // Clear O_NONBLOCK inherited from listener so client socket has blocking I/O with timeouts
-            let clientFlags = fcntl(clientFd, F_GETFL, 0)
-            _ = fcntl(clientFd, F_SETFL, clientFlags & ~O_NONBLOCK)
-
-            var one: Int32 = 1
-            setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-
-            var tv = timeval(tv_sec: 15, tv_usec: 0)
-            setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-            setsockopt(clientFd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-
-            let clientIP = String(cString: inet_ntoa(clientAddr.sin_addr))
-            let clientPort = Int(UInt16(bigEndian: clientAddr.sin_port))
-            let clientDesc = "\(clientIP):\(clientPort)"
-
+            let iface = targetInterface
             Task { [weak self] in
-                await self?.handleClient(clientFd: clientFd, clientDesc: clientDesc, interface: self?.targetInterface ?? "en10")
+                await self?.handleClient(
+                    clientFd: accepted.clientFd,
+                    clientDesc: accepted.clientDesc,
+                    interface: iface
+                )
             }
         }
     }
@@ -216,127 +199,259 @@ public final class SOCKS5Server: @unchecked Sendable {
     // MARK: - SOCKS5 Request Handling
 
     public func handleClient(clientFd: Int32, clientDesc: String, interface: String) async {
+        await handleClient(
+            clientFd: clientFd,
+            clientDesc: clientDesc,
+            interface: interface,
+            onTargetConnected: nil,
+            onBytesTransferred: nil
+        )
+    }
+
+    internal func handleClient(
+        clientFd: Int32,
+        clientDesc: String,
+        interface: String,
+        onTargetConnected: (@Sendable (String, Int, ProxyProtocolType, Int32) -> Void)?,
+        onBytesTransferred: (@Sendable (Int64, Int64) -> Void)?
+    ) async {
         defer { Darwin.close(clientFd) }
 
-        // 1. Handshake greeting
-        guard let greetingHeader = readExact(fd: clientFd, count: 2) else { return }
-        let version = greetingHeader[0]
-        let nMethods = Int(greetingHeader[1])
-
-        guard version == 0x05 else {
-            // SOCKS4 or invalid version
-            return
+        enum HandshakeOutcome {
+            case connected(targetFd: Int32, targetHost: String, targetPort: Int)
+            case failed
         }
 
-        guard nMethods > 0, let methods = readExact(fd: clientFd, count: nMethods) else {
-            return
-        }
+        let outcome: HandshakeOutcome = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let greetingHeader = ProxySocketIO.readExact(fd: clientFd, count: 2) else {
+                    continuation.resume(returning: .failed)
+                    return
+                }
+                let version = greetingHeader[0]
+                let nMethods = Int(greetingHeader[1])
 
-        let selectedMethod = Self.selectAuthMethod(offered: Array(methods))
-        let greetingReply = Data([0x05, selectedMethod])
-        guard writeAll(fd: clientFd, data: greetingReply) else { return }
+                guard version == 0x05 else {
+                    continuation.resume(returning: .failed)
+                    return
+                }
 
-        guard selectedMethod == 0x00 else {
-            // No acceptable auth method
-            return
-        }
+                guard nMethods > 0, let methods = ProxySocketIO.readExact(fd: clientFd, count: nMethods) else {
+                    continuation.resume(returning: .failed)
+                    return
+                }
 
-        // 2. Client Request Frame
-        guard let reqHeader = readExact(fd: clientFd, count: 4) else { return }
-        let reqVer = reqHeader[0]
-        let cmd = reqHeader[1]
-        let atyp = reqHeader[3]
+                let selectedMethod = Self.selectAuthMethod(offered: Array(methods))
+                let greetingReply = Data([0x05, selectedMethod])
+                guard ProxySocketIO.writeAll(fd: clientFd, data: greetingReply), selectedMethod == 0x00 else {
+                    continuation.resume(returning: .failed)
+                    return
+                }
 
-        guard reqVer == 0x05 else { return }
+                guard let reqHeader = ProxySocketIO.readExact(fd: clientFd, count: 4) else {
+                    continuation.resume(returning: .failed)
+                    return
+                }
+                let reqVer = reqHeader[0]
+                let cmd = reqHeader[1]
+                let atyp = reqHeader[3]
 
-        // Only CONNECT (0x01) is supported
-        guard cmd == 0x01 else {
-            let reply = Data([0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-            _ = writeAll(fd: clientFd, data: reply)
-            return
-        }
+                guard reqVer == 0x05 else {
+                    continuation.resume(returning: .failed)
+                    return
+                }
 
-        // Parse target host & port
-        let targetHost: String
-        let targetPort: Int
+                // Only CONNECT (0x01) is supported
+                guard cmd == 0x01 else {
+                    let reply = Self.makeReply(rep: 0x07, atyp: atyp == 0x04 ? 0x04 : 0x01)
+                    _ = ProxySocketIO.writeAll(fd: clientFd, data: reply)
+                    continuation.resume(returning: .failed)
+                    return
+                }
 
-        switch atyp {
-        case 0x01: // IPv4
-            guard let ipBytes = readExact(fd: clientFd, count: 4),
-                  let portBytes = readExact(fd: clientFd, count: 2) else { return }
-            targetHost = "\(ipBytes[0]).\(ipBytes[1]).\(ipBytes[2]).\(ipBytes[3])"
-            targetPort = Int((UInt16(portBytes[0]) << 8) | UInt16(portBytes[1]))
+                let targetHost: String
+                let targetPort: Int
 
-        case 0x03: // Domain Name
-            guard let lenByte = readExact(fd: clientFd, count: 1),
-                  let domainBytes = readExact(fd: clientFd, count: Int(lenByte[0])),
-                  let portBytes = readExact(fd: clientFd, count: 2) else { return }
-            targetHost = String(data: domainBytes, encoding: .utf8) ?? ""
-            targetPort = Int((UInt16(portBytes[0]) << 8) | UInt16(portBytes[1]))
+                switch atyp {
+                case 0x01: // IPv4
+                    guard let ipBytes = ProxySocketIO.readExact(fd: clientFd, count: 4),
+                          let portBytes = ProxySocketIO.readExact(fd: clientFd, count: 2) else {
+                        continuation.resume(returning: .failed)
+                        return
+                    }
+                    targetHost = "\(ipBytes[0]).\(ipBytes[1]).\(ipBytes[2]).\(ipBytes[3])"
+                    targetPort = Int((UInt16(portBytes[0]) << 8) | UInt16(portBytes[1]))
 
-        case 0x04: // IPv6
-            guard let ipBytes = readExact(fd: clientFd, count: 16),
-                  let portBytes = readExact(fd: clientFd, count: 2) else { return }
-            var sin6 = in6_addr()
-            _ = ipBytes.withUnsafeBytes { ptr in
-                memcpy(&sin6, ptr.baseAddress!, 16)
+                case 0x03: // Domain Name
+                    guard let lenByte = ProxySocketIO.readExact(fd: clientFd, count: 1),
+                          let domainBytes = ProxySocketIO.readExact(fd: clientFd, count: Int(lenByte[0])),
+                          let portBytes = ProxySocketIO.readExact(fd: clientFd, count: 2) else {
+                        continuation.resume(returning: .failed)
+                        return
+                    }
+                    targetHost = String(data: domainBytes, encoding: .utf8) ?? ""
+                    targetPort = Int((UInt16(portBytes[0]) << 8) | UInt16(portBytes[1]))
+
+                case 0x04: // IPv6
+                    guard let ipBytes = ProxySocketIO.readExact(fd: clientFd, count: 16),
+                          let portBytes = ProxySocketIO.readExact(fd: clientFd, count: 2) else {
+                        continuation.resume(returning: .failed)
+                        return
+                    }
+                    var sin6 = in6_addr()
+                    _ = ipBytes.withUnsafeBytes { ptr in
+                        memcpy(&sin6, ptr.baseAddress!, 16)
+                    }
+                    var strBuf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+                    _ = inet_ntop(AF_INET6, &sin6, &strBuf, socklen_t(INET6_ADDRSTRLEN))
+                    targetHost = strBuf.withUnsafeBufferPointer { ptr in
+                        ptr.baseAddress.map { String(cString: $0) } ?? ""
+                    }
+                    targetPort = Int((UInt16(portBytes[0]) << 8) | UInt16(portBytes[1]))
+
+                default:
+                    let reply = Self.makeReply(rep: 0x08, atyp: 0x01)
+                    _ = ProxySocketIO.writeAll(fd: clientFd, data: reply)
+                    continuation.resume(returning: .failed)
+                    return
+                }
+
+                guard !targetHost.isEmpty, (1...65535).contains(targetPort) else {
+                    let reply = Self.makeReply(rep: 0x04, atyp: atyp == 0x04 ? 0x04 : 0x01)
+                    _ = ProxySocketIO.writeAll(fd: clientFd, data: reply)
+                    continuation.resume(returning: .failed)
+                    return
+                }
+
+                let connResult = self.connectOutbound(host: targetHost, port: targetPort, targetInterface: interface)
+                switch connResult {
+                case .failure(let repCode):
+                    let reply = Self.makeReply(rep: repCode, atyp: atyp == 0x04 ? 0x04 : 0x01)
+                    _ = ProxySocketIO.writeAll(fd: clientFd, data: reply)
+                    continuation.resume(returning: .failed)
+
+                case .success(let targetFd):
+                    let reply = Self.makeSuccessReply(atyp: atyp, targetFd: targetFd, fallbackPort: targetPort)
+                    guard ProxySocketIO.writeAll(fd: clientFd, data: reply) else {
+                        Darwin.close(targetFd)
+                        continuation.resume(returning: .failed)
+                        return
+                    }
+                    continuation.resume(returning: .connected(targetFd: targetFd, targetHost: targetHost, targetPort: targetPort))
+                }
             }
-            var strBuf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
-            _ = inet_ntop(AF_INET6, &sin6, &strBuf, socklen_t(INET6_ADDRSTRLEN))
-            targetHost = strBuf.withUnsafeBufferPointer { ptr in
-                ptr.baseAddress.map { String(cString: $0) } ?? ""
-            }
-            targetPort = Int((UInt16(portBytes[0]) << 8) | UInt16(portBytes[1]))
-
-        default:
-            let reply = Data([0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-            _ = writeAll(fd: clientFd, data: reply)
-            return
         }
 
-        // 3. Connect to Outbound Target with Interface Binding
-        let connResult = connectOutbound(host: targetHost, port: targetPort, targetInterface: interface)
-        switch connResult {
-        case .failure(let repCode):
-            let reply = Data([0x05, repCode, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-            _ = writeAll(fd: clientFd, data: reply)
+        guard case .connected(let targetFd, let targetHost, let targetPort) = outcome else {
             return
+        }
+        defer { Darwin.close(targetFd) }
 
-        case .success(let targetFd):
-            defer { Darwin.close(targetFd) }
+        let connId = UUID()
+        let connInfo = ProxyConnectionInfo(
+            id: connId,
+            port: port,
+            clientAddress: clientDesc,
+            targetHost: targetHost,
+            targetPort: targetPort,
+            egressInterface: interface,
+            protocolType: .socks5
+        )
 
-            // Reply Success: 0x05, 0x00, 0x00, 0x01, BND.ADDR (127.0.0.1), BND.PORT
-            let boundPort = UInt16(targetPort)
-            let portHi = UInt8((boundPort >> 8) & 0xFF)
-            let portLo = UInt8(boundPort & 0xFF)
-            let reply = Data([0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, portHi, portLo])
-            guard writeAll(fd: clientFd, data: reply) else { return }
+        lock.withLock {
+            activeConns[connId] = (connInfo, clientFd, targetFd)
+        }
+        onTargetConnected?(targetHost, targetPort, .socks5, targetFd)
 
-            // Track connection
-            let connId = UUID()
-            let connInfo = ProxyConnectionInfo(
-                id: connId,
-                port: port,
-                clientAddress: clientDesc,
-                targetHost: targetHost,
-                targetPort: targetPort,
-                egressInterface: interface,
-                protocolType: .socks5
-            )
-
+        defer {
             lock.withLock {
-                activeConns[connId] = (connInfo, clientFd, targetFd)
+                _ = activeConns.removeValue(forKey: connId)
             }
+        }
 
-            defer {
-                lock.withLock {
-                    _ = activeConns.removeValue(forKey: connId)
+        await ProxySocketIO.streamAndTrack(
+            clientFd: clientFd,
+            targetFd: targetFd,
+            recordBytes: { [weak self] readDelta, writeDelta in
+                self?.recordBytes(connId: connId, readDelta: readDelta, writeDelta: writeDelta)
+            },
+            onBytesTransferred: onBytesTransferred
+        )
+    }
+
+    private static func makeReply(rep: UInt8, atyp: UInt8, port: Int = 0) -> Data {
+        let clampedPort = max(0, min(65535, port))
+        let boundPort = UInt16(clampedPort)
+        let portHi = UInt8((boundPort >> 8) & 0xFF)
+        let portLo = UInt8(boundPort & 0xFF)
+
+        if atyp == 0x04 {
+            var data = Data([0x05, rep, 0x00, 0x04])
+            data.append(contentsOf: [UInt8](repeating: 0, count: 16))
+            data.append(contentsOf: [portHi, portLo])
+            return data
+        }
+        return Data([0x05, rep, 0x00, 0x01, 0, 0, 0, 0, portHi, portLo])
+    }
+
+    private static func makeSuccessReply(atyp: UInt8, targetFd: Int32, fallbackPort: Int) -> Data {
+        let clampedFallbackPort = UInt16(max(0, min(65535, fallbackPort)))
+        var storage = sockaddr_storage()
+        var len = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        let hasSockName = withUnsafeMutablePointer(to: &storage) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                getsockname(targetFd, sa, &len)
+            }
+        } == 0
+
+        if atyp == 0x04 {
+            var addrBytes = [UInt8](repeating: 0, count: 16)
+            addrBytes[15] = 1 // ::1 fallback
+            var replyPort = clampedFallbackPort
+
+            if hasSockName && Int32(storage.ss_family) == AF_INET6 {
+                let sin6 = withUnsafePointer(to: &storage) { ptr in
+                    ptr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
+                }
+                replyPort = UInt16(bigEndian: sin6.sin6_port)
+                var rawAddr = sin6.sin6_addr
+                withUnsafeBytes(of: &rawAddr) { bytes in
+                    if bytes.count == 16 {
+                        addrBytes = Array(bytes)
+                    }
                 }
             }
 
-            // 4. Bi-directional raw streaming
-            await streamBidirectional(clientFd: clientFd, targetFd: targetFd)
+            var data = Data([0x05, 0x00, 0x00, 0x04])
+            data.append(contentsOf: addrBytes)
+            data.append(UInt8((replyPort >> 8) & 0xFF))
+            data.append(UInt8(replyPort & 0xFF))
+            return data
         }
+
+        // Preserve 10-byte IPv4 reply shape for ATYP 0x01 and 0x03
+        var addrBytes: [UInt8] = [127, 0, 0, 1]
+        var replyPort = clampedFallbackPort
+
+        if hasSockName && Int32(storage.ss_family) == AF_INET {
+            let sin = withUnsafePointer(to: &storage) { ptr in
+                ptr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+            }
+            replyPort = UInt16(bigEndian: sin.sin_port)
+            var rawAddr = sin.sin_addr.s_addr
+            withUnsafeBytes(of: &rawAddr) { bytes in
+                if bytes.count == 4 {
+                    addrBytes = Array(bytes)
+                }
+            }
+        }
+
+        return Data([
+            0x05, 0x00, 0x00, 0x01,
+            addrBytes[0], addrBytes[1], addrBytes[2], addrBytes[3],
+            UInt8((replyPort >> 8) & 0xFF),
+            UInt8(replyPort & 0xFF)
+        ])
     }
 
     public enum OutboundConnectResult {
@@ -350,159 +465,33 @@ public final class SOCKS5Server: @unchecked Sendable {
         targetInterface: String,
         timeout: TimeInterval = 5.0
     ) -> OutboundConnectResult {
-        var hints = addrinfo()
-        hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = SOCK_STREAM
-        hints.ai_protocol = IPPROTO_TCP
-
-        var res: UnsafeMutablePointer<addrinfo>?
-        let portStr = String(port)
-        let gaiStatus = getaddrinfo(host, portStr, &hints, &res)
-        guard gaiStatus == 0, let addrList = res else {
-            return .failure(0x04) // Host unreachable
-        }
-        defer { freeaddrinfo(res) }
-
-        var ptr: UnsafeMutablePointer<addrinfo>? = addrList
-        var lastErr: Int32 = ECONNREFUSED
-        var connectedFd: Int32 = -1
-
-        let isLoopback = host == "127.0.0.1" || host == "localhost" || host == "::1" || host.hasPrefix("127.")
-
-        while let current = ptr {
-            let info = current.pointee
-            ptr = current.pointee.ai_next
-
-            let fd = socket(info.ai_family, info.ai_socktype, info.ai_protocol)
-            guard fd >= 0 else {
-                lastErr = errno
-                continue
-            }
-
-            var one: Int32 = 1
-            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-
-            // Interface binding
-            if !isLoopback && !targetInterface.isEmpty && targetInterface != "auto" && targetInterface != "any" {
-                if let ifIdx = DarwinSocketHelper.getInterfaceIndex(for: targetInterface) {
-                    _ = try? DarwinSocketHelper.bindSocket(fd: fd, toInterfaceIndex: ifIdx)
-                }
-            } else if targetInterface == "lo0" {
-                if let loIdx = DarwinSocketHelper.getInterfaceIndex(for: "lo0") {
-                    _ = try? DarwinSocketHelper.bindSocket(fd: fd, toInterfaceIndex: loIdx)
-                }
-            }
-
-            var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
-            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-
-            let connRes = Darwin.connect(fd, info.ai_addr, info.ai_addrlen)
-            if connRes == 0 {
-                connectedFd = fd
-                break
-            } else {
-                lastErr = errno
-                Darwin.close(fd)
-            }
-        }
-
-        if connectedFd >= 0 {
-            return .success(connectedFd)
-        } else {
-            let rep = Self.mapPOSIXErrorToSOCKS5Reply(errno: lastErr)
-            return .failure(rep)
+        switch ProxySocketIO.connectOutbound(
+            host: host,
+            port: port,
+            targetInterface: targetInterface,
+            timeout: timeout
+        ) {
+        case .success(let fd):
+            return .success(fd)
+        case .failure(let err):
+            return .failure(Self.mapPOSIXErrorToSOCKS5Reply(errno: err))
         }
     }
 
     // MARK: - Streaming & Helpers
 
-    private func streamBidirectional(clientFd: Int32, targetFd: Int32) async {
-        await withTaskGroup(of: Int64.self) { group in
-            // Client -> Target
-            group.addTask {
-                let bytes = Self.pump(from: clientFd, to: targetFd)
-                _ = shutdown(targetFd, SHUT_WR)
-                return bytes
-            }
-
-            // Target -> Client
-            group.addTask {
-                let bytes = Self.pump(from: targetFd, to: clientFd)
-                _ = shutdown(clientFd, SHUT_WR)
-                return bytes
-            }
-
-            var totalClientToTarget: Int64 = 0
-            var totalTargetToClient: Int64 = 0
-            for await bytes in group {
-                if totalClientToTarget == 0 {
-                    totalClientToTarget = bytes
-                } else {
-                    totalTargetToClient = bytes
-                }
-            }
-
-            lock.withLock {
-                bytesReadCounter += totalClientToTarget
-                bytesWrittenCounter += totalTargetToClient
+    private func recordBytes(connId: UUID, readDelta: Int64, writeDelta: Int64) {
+        lock.withLock {
+            bytesReadCounter += readDelta
+            bytesWrittenCounter += writeDelta
+            if let existing = activeConns[connId] {
+                let updated = ProxySocketIO.makeUpdatedConnectionInfo(existing.info, readDelta: readDelta, writeDelta: writeDelta)
+                activeConns[connId] = (updated, existing.clientFd, existing.targetFd)
             }
         }
     }
 
     public static func pump(from srcFd: Int32, to dstFd: Int32, bufferSize: Int = 32768) -> Int64 {
-        var buffer = [UInt8](repeating: 0, count: bufferSize)
-        var total: Int64 = 0
-
-        while true {
-            let n = Darwin.read(srcFd, &buffer, bufferSize)
-            guard n > 0 else { break }
-
-            var written = 0
-            var writeFailed = false
-            while written < n {
-                let bytesToWrite = n - written
-                let w = buffer.withUnsafeBytes { ptr -> Int in
-                    guard let base = ptr.baseAddress else { return -1 }
-                    return Darwin.write(dstFd, base.advanced(by: written), bytesToWrite)
-                }
-                if w <= 0 {
-                    writeFailed = true
-                    break
-                }
-                written += w
-            }
-            if writeFailed { break }
-            total += Int64(n)
-        }
-        return total
-    }
-
-    private func readExact(fd: Int32, count: Int) -> Data? {
-        var data = Data(count: count)
-        var bytesRead = 0
-        while bytesRead < count {
-            let n = data.withUnsafeMutableBytes { ptr -> Int in
-                guard let base = ptr.baseAddress else { return -1 }
-                return Darwin.read(fd, base.advanced(by: bytesRead), count - bytesRead)
-            }
-            if n <= 0 { return nil }
-            bytesRead += n
-        }
-        return data
-    }
-
-    private func writeAll(fd: Int32, data: Data) -> Bool {
-        var bytesWritten = 0
-        let total = data.count
-        while bytesWritten < total {
-            let n = data.withUnsafeBytes { ptr -> Int in
-                guard let base = ptr.baseAddress else { return -1 }
-                return Darwin.write(fd, base.advanced(by: bytesWritten), total - bytesWritten)
-            }
-            if n <= 0 { return false }
-            bytesWritten += n
-        }
-        return true
+        ProxySocketIO.pump(from: srcFd, to: dstFd, bufferSize: bufferSize)
     }
 }

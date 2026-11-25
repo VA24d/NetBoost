@@ -90,4 +90,121 @@ struct RepairRoutinesTests {
         #expect(routines.history[0].contains("DNS cache flushed"))
         #expect(routines.history[1].contains("ARP table flushed"))
     }
+
+    @Test("Shell scripts safely single-quote service names containing spaces and special chars")
+    func testQuotingForServiceNamesWithSpacesAndMetacharacters() {
+        let batchScript = RepairRoutines.makeBatchAutoFixScript(service: "USB 10/100 LAN", mtu: 1280)
+        #expect(batchScript.contains("'/usr/sbin/networksetup' '-setMTU' 'USB 10/100 LAN' '1280'"))
+
+        let cleanScript = RepairRoutines.makeCleanProxiesScript(service: "USB 10/100 LAN")
+        #expect(cleanScript.contains("'/usr/sbin/networksetup' '-setautoproxystate' 'USB 10/100 LAN' 'off'"))
+        #expect(cleanScript.contains("'/usr/sbin/networksetup' '-setwebproxystate' 'USB 10/100 LAN' 'off'"))
+        #expect(cleanScript.contains("'/usr/sbin/networksetup' '-setsecurewebproxystate' 'USB 10/100 LAN' 'off'"))
+
+        let injectedScript = RepairRoutines.makeCleanProxiesScript(service: "Wi-Fi; rm -rf /")
+        #expect(injectedScript.contains("'Wi-Fi; rm -rf /'"))
+    }
+
+    @Test("RepairRoutines propagates elevationDenied and helper failures without silent swallowing")
+    func testErrorPropagationAndHelperFallback() async {
+        final class MockExecutor: PrivilegeCommandExecuting, @unchecked Sendable {
+            var isRoot: Bool = false
+            var helperPath: String? = nil
+            var elevatedError: Error? = nil
+            var helperError: Error? = nil
+            var commandOutputs: [String: ShellOutput] = [:]
+            var recordedHelperActions: [(action: String, args: [String])] = []
+            var recordedElevatedScripts: [String] = []
+
+            func locateHelperScript() -> String? { helperPath }
+
+            func runCommand(_ executable: String, arguments: [String]) async throws -> ShellOutput {
+                let key = ([executable] + arguments).joined(separator: " ")
+                return commandOutputs[key] ?? ShellOutput(stdout: "", stderr: "", exitCode: 0)
+            }
+
+            func runBash(_ script: String) async throws -> ShellOutput {
+                ShellOutput(stdout: "", stderr: "", exitCode: 0)
+            }
+
+            func runElevated(script: String) async throws -> ShellOutput {
+                recordedElevatedScripts.append(script)
+                if let err = elevatedError { throw err }
+                return ShellOutput(stdout: "", stderr: "", exitCode: 0)
+            }
+
+            func runHelper(action: String, arguments: [String]) async throws -> ShellOutput {
+                recordedHelperActions.append((action, arguments))
+                if let err = helperError { throw err }
+                return ShellOutput(stdout: "", stderr: "", exitCode: 0)
+            }
+        }
+
+        // 1. elevationDenied must propagate immediately without calling helper
+        let deniedExec = MockExecutor()
+        deniedExec.helperPath = "/usr/local/bin/netboost-helper.sh"
+        deniedExec.elevatedError = PrivilegeError.elevationDenied
+        let deniedRoutines = RepairRoutines(executor: deniedExec)
+
+        await #expect(throws: PrivilegeError.elevationDenied) {
+            try await deniedRoutines.executeBatchAutoFix(service: "USB 10/100 LAN", mtu: 1280)
+        }
+        #expect(deniedExec.recordedHelperActions.isEmpty)
+        #expect(deniedExec.recordedElevatedScripts.first?.contains("'USB 10/100 LAN'") == true)
+
+        // 2. When helper is absent, original elevation error must propagate
+        let noHelperExec = MockExecutor()
+        noHelperExec.helperPath = nil
+        noHelperExec.elevatedError = PrivilegeError.executionFailed("osascript failed")
+        let noHelperRoutines = RepairRoutines(executor: noHelperExec)
+
+        await #expect(throws: PrivilegeError.executionFailed("osascript failed")) {
+            try await noHelperRoutines.cleanProxies(service: "USB 10/100 LAN")
+        }
+
+        // 3. When helper is present and also fails, helper failure must propagate
+        let failingHelperExec = MockExecutor()
+        failingHelperExec.helperPath = "/usr/local/bin/netboost-helper.sh"
+        failingHelperExec.elevatedError = PrivilegeError.executionFailed("elevated failed")
+        failingHelperExec.helperError = PrivilegeError.executionFailed("helper failed")
+        let failingHelperRoutines = RepairRoutines(executor: failingHelperExec)
+
+        await #expect(throws: PrivilegeError.executionFailed("helper failed")) {
+            try await failingHelperRoutines.flushDNS()
+        }
+        #expect(failingHelperExec.recordedHelperActions.count == 1)
+        #expect(failingHelperExec.recordedHelperActions.first?.action == "flush-dns")
+    }
+
+    @Test("PrivateRelayManager inspects proxy bypass domains before webproxy fallback")
+    func testPrivateRelayBypassInspection() async {
+        final class BypassExecutor: PrivilegeCommandExecuting, @unchecked Sendable {
+            var isRoot: Bool = false
+            var executedCmds: [[String]] = []
+            func locateHelperScript() -> String? { nil }
+            func runCommand(_ executable: String, arguments: [String]) async throws -> ShellOutput {
+                executedCmds.append([executable] + arguments)
+                if arguments.first == "-getproxybypassdomains" {
+                    return ShellOutput(stdout: "*.mask.icloud.com\n*.mask-h2.icloud.com\n", stderr: "", exitCode: 0)
+                }
+                return ShellOutput(stdout: "Enabled: No\n", stderr: "", exitCode: 0)
+            }
+            func runBash(_ script: String) async throws -> ShellOutput { ShellOutput(stdout: "", stderr: "", exitCode: 0) }
+            func runElevated(script: String) async throws -> ShellOutput { ShellOutput(stdout: "", stderr: "", exitCode: 0) }
+            func runHelper(action: String, arguments: [String]) async throws -> ShellOutput { ShellOutput(stdout: "", stderr: "", exitCode: 0) }
+        }
+
+        #expect(PrivateRelayManager.makeInspectServiceProxiesCommand(service: "USB 10/100 LAN") == [
+            "/usr/sbin/networksetup", "-getwebproxy", "USB 10/100 LAN"
+        ])
+        #expect(PrivateRelayManager.makeInspectProxyBypassCommand(service: "USB 10/100 LAN") == [
+            "/usr/sbin/networksetup", "-getproxybypassdomains", "USB 10/100 LAN"
+        ])
+
+        let exec = BypassExecutor()
+        let routines = RepairRoutines(executor: exec)
+        let isolated = await routines.isPrivateRelayIsolated(service: "USB 10/100 LAN")
+        #expect(isolated == true)
+        #expect(exec.executedCmds.first == ["/usr/sbin/networksetup", "-getproxybypassdomains", "USB 10/100 LAN"])
+    }
 }

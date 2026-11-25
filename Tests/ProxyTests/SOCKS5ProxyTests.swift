@@ -257,4 +257,70 @@ struct SOCKS5ProxyTests {
         #expect(replyCount == 10)
         #expect(reply[1] == 0x07) // Command not supported
     }
+
+    @Test("Live SOCKS5 Server: Bidirectional byte attribution never swaps asymmetric counts")
+    func testBidirectionalByteAttributionAccuracy() async throws {
+        let serverReply = Data(repeating: 0xAB, count: 512)
+        let mockTarget = MockSOCKS5TargetServer(mode: .fixedData(serverReply))
+        let targetPort = try await mockTarget.start()
+        defer { mockTarget.stop() }
+
+        let proxy = SOCKS5Server(port: 0, targetInterface: "lo0")
+        try await proxy.start()
+        defer { proxy.stop() }
+
+        let clientFd = socket(AF_INET, SOCK_STREAM, 0)
+        defer { Darwin.close(clientFd) }
+        var one: Int32 = 1
+        setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(proxy.boundPort).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+
+        let connRes = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                Darwin.connect(clientFd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        #expect(connRes == 0)
+
+        // Handshake + CONNECT
+        let greeting = Data([0x05, 0x01, 0x00])
+        _ = greeting.withUnsafeBytes { Darwin.write(clientFd, $0.baseAddress!, greeting.count) }
+        var greetResp = [UInt8](repeating: 0, count: 2)
+        _ = Darwin.read(clientFd, &greetResp, 2)
+
+        var connectReq = Data([0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1])
+        connectReq.append(UInt8((targetPort >> 8) & 0xFF))
+        connectReq.append(UInt8(targetPort & 0xFF))
+        _ = connectReq.withUnsafeBytes { Darwin.write(clientFd, $0.baseAddress!, connectReq.count) }
+        var reply = [UInt8](repeating: 0, count: 10)
+        _ = Darwin.read(clientFd, &reply, 10)
+        #expect(reply[1] == 0x00)
+
+        // Client sends 64 bytes; target replies with 512 bytes
+        let clientPayload = Data(repeating: 0x01, count: 64)
+        _ = clientPayload.withUnsafeBytes { Darwin.write(clientFd, $0.baseAddress!, clientPayload.count) }
+
+        var received = Data()
+        var buf = [UInt8](repeating: 0, count: 512)
+        while received.count < 512 {
+            let n = Darwin.read(clientFd, &buf, buf.count)
+            if n <= 0 { break }
+            received.append(buf, count: n)
+        }
+        #expect(received == serverReply)
+
+        _ = Darwin.shutdown(clientFd, SHUT_RDWR)
+
+        let settled = try await TestAssertions.pollUntil(timeout: 2.0) {
+            proxy.totalBytesRead == 64 && proxy.totalBytesWritten == 512
+        }
+        #expect(settled)
+        #expect(proxy.totalBytesRead == 64)
+        #expect(proxy.totalBytesWritten == 512)
+    }
 }

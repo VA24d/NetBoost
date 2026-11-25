@@ -13,15 +13,35 @@ public final class RoutePinningEngine: Sendable {
         self.interface = interface
     }
 
+    /// Validates strict dotted-decimal IPv4 address (4 octets 0...255, ASCII digits only).
+    public static func validateIPv4(_ ip: String) -> Bool {
+        let octets = ip.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4 else { return false }
+        return octets.allSatisfy { octet in
+            guard !octet.isEmpty,
+                  octet.allSatisfy({ $0.isASCII && $0.isNumber }),
+                  let value = Int(octet),
+                  (0...255).contains(value) else {
+                return false
+            }
+            return true
+        }
+    }
+
     /// Validates CIDR notation (e.g. "10.8.0.0/16"). Prefix must be 0...32 and 4 octets 0...255.
     public static func validateCIDR(_ cidr: String) -> Bool {
-        let parts = cidr.split(separator: "/")
+        let parts = cidr.split(separator: "/", omittingEmptySubsequences: false)
         guard parts.count == 2,
+              !parts[1].isEmpty,
+              parts[1].allSatisfy({ $0.isASCII && $0.isNumber }),
               let prefix = Int(parts[1]),
-              prefix >= 0 && prefix <= 32 else { return false }
-        let octets = parts[0].split(separator: ".")
-        guard octets.count == 4 else { return false }
-        return octets.allSatisfy { Int($0) != nil && Int($0)! >= 0 && Int($0)! <= 255 }
+              (0...32).contains(prefix) else { return false }
+        return validateIPv4(String(parts[0]))
+    }
+
+    /// Validates BSD network interface name (e.g. "en10", "en0").
+    public static func validateInterface(_ interface: String) -> Bool {
+        !interface.isEmpty && interface.range(of: "^[a-zA-Z0-9]+$", options: .regularExpression) != nil
     }
 
     /// Converts a CIDR prefix length (e.g. 16) to dotted-decimal netmask (e.g. "255.255.0.0").
@@ -64,6 +84,28 @@ public final class RoutePinningEngine: Sendable {
         }
     }
 
+    private static func routeArguments(
+        action: String,
+        subnet: String,
+        gateway: String,
+        interface: String?
+    ) -> [String] {
+        var args = ["-n", action, "-net"]
+        if subnet.contains("/") {
+            let parts = subnet.split(separator: "/")
+            let network = String(parts[0])
+            let prefix = Int(parts[1]) ?? 32
+            let netmask = cidrToNetmask(prefix: prefix)
+            args.append(contentsOf: [network, "-netmask", netmask, gateway])
+        } else {
+            args.append(contentsOf: [subnet, gateway])
+        }
+        if let iface = interface {
+            args.append(contentsOf: ["-ifp", iface])
+        }
+        return args
+    }
+
     /// Pins a subnet to the gateway via interface, executing with elevation if possible.
     public func pinSubnet(
         subnet: String,
@@ -73,27 +115,55 @@ public final class RoutePinningEngine: Sendable {
         let gw = gateway ?? self.gateway
         let iface = interface ?? self.interface
 
-        // Validate CIDR format if slash is present
-        if subnet.contains("/") && !Self.validateCIDR(subnet) {
+        guard Self.validateCIDR(subnet) || Self.validateIPv4(subnet) else {
             return RoutePinningResult(
                 success: false,
                 subnet: subnet,
                 gateway: gw,
                 interface: iface,
-                message: "Malformed CIDR subnet notation: \(subnet)",
+                message: "Malformed subnet notation: \(subnet)",
                 manualCommand: nil
             )
         }
 
-        let cmd = "/sbin/route -n add -net \(subnet) \(gw) -ifp \(iface)"
-        let fallback = "sudo \(cmd)"
+        guard Self.validateIPv4(gw) else {
+            return RoutePinningResult(
+                success: false,
+                subnet: subnet,
+                gateway: gw,
+                interface: iface,
+                message: "Invalid gateway IPv4 address: \(gw)",
+                manualCommand: nil
+            )
+        }
+
+        guard Self.validateInterface(iface) else {
+            return RoutePinningResult(
+                success: false,
+                subnet: subnet,
+                gateway: gw,
+                interface: iface,
+                message: "Invalid network interface name: \(iface)",
+                manualCommand: nil
+            )
+        }
+
+        let args = Self.routeArguments(action: "add", subnet: subnet, gateway: gw, interface: iface)
+        let quotedCmd = (["/sbin/route"] + args).map(ShellCommand.shellQuote).joined(separator: " ")
+        let fallback = "sudo \(quotedCmd)"
 
         do {
             let output: ShellOutput
-            if PrivilegeHelper.isRoot {
-                output = try await ShellCommand.runBash(cmd)
-            } else {
-                output = try await PrivilegeHelper.runElevated(script: cmd)
+            do {
+                output = try await PrivilegeHelper.executeDaemonOrElevated(
+                    rootExecutable: "/sbin/route",
+                    rootArguments: args,
+                    daemonAction: .pinRoute,
+                    daemonArguments: [subnet, gw, iface],
+                    fallbackScript: quotedCmd
+                )
+            } catch PrivilegeError.executionFailed(let msg) where msg.contains("File exists") {
+                output = ShellOutput(stdout: "", stderr: msg, exitCode: 1)
             }
 
             if output.succeeded || output.stderr.contains("File exists") {
@@ -134,15 +204,45 @@ public final class RoutePinningEngine: Sendable {
     ) async -> RoutePinningResult {
         let gw = gateway ?? self.gateway
         let iface = self.interface
-        let cmd = "/sbin/route -n delete -net \(subnet) \(gw)"
-        let fallback = "sudo \(cmd)"
+
+        guard Self.validateCIDR(subnet) || Self.validateIPv4(subnet) else {
+            return RoutePinningResult(
+                success: false,
+                subnet: subnet,
+                gateway: gw,
+                interface: iface,
+                message: "Malformed subnet notation: \(subnet)",
+                manualCommand: nil
+            )
+        }
+
+        guard Self.validateIPv4(gw) else {
+            return RoutePinningResult(
+                success: false,
+                subnet: subnet,
+                gateway: gw,
+                interface: iface,
+                message: "Invalid gateway IPv4 address: \(gw)",
+                manualCommand: nil
+            )
+        }
+
+        let args = Self.routeArguments(action: "delete", subnet: subnet, gateway: gw, interface: nil)
+        let quotedCmd = (["/sbin/route"] + args).map(ShellCommand.shellQuote).joined(separator: " ")
+        let fallback = "sudo \(quotedCmd)"
 
         do {
             let output: ShellOutput
-            if PrivilegeHelper.isRoot {
-                output = try await ShellCommand.runBash(cmd)
-            } else {
-                output = try await PrivilegeHelper.runElevated(script: cmd)
+            do {
+                output = try await PrivilegeHelper.executeDaemonOrElevated(
+                    rootExecutable: "/sbin/route",
+                    rootArguments: args,
+                    daemonAction: .unpinRoute,
+                    daemonArguments: [subnet, gw],
+                    fallbackScript: quotedCmd
+                )
+            } catch PrivilegeError.executionFailed(let msg) where msg.contains("not in table") {
+                output = ShellOutput(stdout: "", stderr: msg, exitCode: 1)
             }
 
             if output.succeeded || output.stderr.contains("not in table") {

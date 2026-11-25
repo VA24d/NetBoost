@@ -56,15 +56,12 @@ public final class CampusDoctor: CampusDoctorProtocol, Sendable {
     public func runFullDiagnostics() async -> NetworkTelemetryReport {
         let startTime = Date()
 
-        // 1. Fetch current network interfaces
         let interfaces = await interfaceProvider.fetchInterfaces()
         let primaryInterface = interfaces.first(where: { $0.isPrimary }) ?? interfaces.first
 
-        // 2. Identify Gateway & Campus Core targets
         let gatewayTarget = primaryInterface?.gateway ?? LatencyProbe.localGateway
         let campusCoreTarget = LatencyProbe.campusCore
 
-        // 3. Run concurrent probes
         async let gatewayProbe = latencyProbe.probe(target: gatewayTarget)
         async let campusCoreProbe = latencyProbe.probe(target: campusCoreTarget)
         async let turingProbe = latencyProbe.probe(target: LatencyProbe.turingHPC)
@@ -86,16 +83,13 @@ public final class CampusDoctor: CampusDoctorProtocol, Sendable {
         if google.isReachable { externalRTTs[LatencyProbe.google] = google.latencyMs }
         if claude.isReachable { externalRTTs[LatencyProbe.claude] = claude.latencyMs }
 
-        // 4. Identify Detected Issues
         var detectedIssues: [DetectedIssue] = []
 
-        // Captive portal issue
         let isCaptiveDetected = captive.status == .detected || captive.status == .redirecting
         if let captiveIssue = captiveDetector.createIssueIfActive(status: captive.status, redirectURL: captive.redirectURL) {
             detectedIssues.append(captiveIssue)
         }
 
-        // MTU issues for interfaces
         for iface in interfaces {
             let isCellular = iface.bsdName == "en9" || iface.ipAddresses.contains(where: { $0.address.hasPrefix("172.20.10.") })
             if let mtuIssue = mtuManager.detectSuboptimalMTU(interface: iface, isCellular: isCellular) {
@@ -103,7 +97,6 @@ public final class CampusDoctor: CampusDoctorProtocol, Sendable {
             }
         }
 
-        // High gateway latency / loss issue
         if gw.packetLossPercent > 20.0 || (gw.isReachable && gw.latencyMs > 100.0) {
             detectedIssues.append(DetectedIssue(
                 severity: .warning,

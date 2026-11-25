@@ -73,6 +73,7 @@ public struct CaptiveDetector: Sendable {
         config.timeoutIntervalForRequest = 5.0
         let delegate = RedirectCatcherDelegate()
         let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
 
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {

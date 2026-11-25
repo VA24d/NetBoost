@@ -3,174 +3,216 @@ import NetBoostCore
 
 public struct HeaderBarView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var showHelperPopover = false
 
     public init() {}
 
     public var body: some View {
-        HStack(spacing: 16) {
-            // Speedometers: Download & Upload
-            HStack(spacing: 20) {
-                // Download Speedometer
-                HStack(spacing: 8) {
-                    Image(systemName: "arrow.down.circle.fill")
-                        .font(.system(size: 18))
-                        .foregroundColor(GlassTheme.cyanSapphire)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("DOWNLOAD")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundColor(GlassTheme.textTertiary)
-                        Text(SpeedFormatter.formatSpeed(appState.smoothedDownloadBps))
-                            .font(.system(size: 15, weight: .bold, design: .monospaced))
-                            .foregroundColor(GlassTheme.cyanSapphire)
-                    }
-                }
+        HStack(spacing: 8) {
+            throughputStrip
+                .fixedSize(horizontal: true, vertical: false)
 
-                // Upload Speedometer
-                HStack(spacing: 8) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 18))
-                        .foregroundColor(GlassTheme.emeraldGreen)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("UPLOAD")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundColor(GlassTheme.textTertiary)
-                        Text(SpeedFormatter.formatSpeed(appState.smoothedUploadBps))
-                            .font(.system(size: 15, weight: .bold, design: .monospaced))
-                            .foregroundColor(GlassTheme.emeraldGreen)
+            Spacer(minLength: 4)
+
+            helperAuthorizationControl
+
+            StatusPill(
+                text: appState.activeStatePill,
+                color: environmentColor(appState.activeEnvironment),
+                showPulse: false
+            )
+            .layoutPriority(-1)
+
+            if let summary = appState.autoFixSummary {
+                HStack(spacing: 4) {
+                    Image(systemName: summary.contains("error") ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                        .font(.system(size: 11))
+                    Text(summary.contains("error") ? "Fix Failed" : "Fixed")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .lineLimit(1)
+                }
+                .foregroundColor(summary.contains("error") ? GlassTheme.redAlert : GlassTheme.emeraldGreen)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background((summary.contains("error") ? GlassTheme.redAlert : GlassTheme.emeraldGreen).opacity(0.12))
+                .clipShape(Capsule())
+                .fixedSize(horizontal: true, vertical: false)
+                .help(summary)
+            }
+
+            Button {
+                Task {
+                    await appState.executeAutoFix()
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    if appState.isAutoFixRunning {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 11.5))
                     }
+                    Text(appState.isAutoFixRunning ? "Fixing..." : "Auto-Fix")
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .glassCard(cornerRadius: 12)
+            .buttonStyle(GlowingButtonStyle(accentColor: GlassTheme.sapphireBlue, isProminent: true))
+            .disabled(appState.isAutoFixRunning)
+            .help("Set MTU 1280, flush DNS cache, and clear ARP table on \(appState.selectedRepairService)")
 
-            Spacer()
-
-            // Privilege Authorization Status / Upfront Authorization Trigger
-            if !appState.isAuthorized {
-                Button {
-                    Task {
-                        await appState.requestUpfrontAuthorization()
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "lock.shield")
-                            .font(.system(size: 11))
-                        Text("Authorize")
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+            Menu {
+                Section("Status Bar Style") {
+                    ForEach(MenuBarIconStyle.allCases) { style in
+                        Button {
+                            appState.menuBarIconStyle = style
+                        } label: {
+                            HStack {
+                                Text(style.rawValue)
+                                if appState.menuBarIconStyle == style {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
                     }
                 }
-                .buttonStyle(GlowingButtonStyle(accentColor: GlassTheme.cyanSapphire, isProminent: false))
-                .help("Grant upfront administrator privileges for instant one-click optimizations")
-            } else {
-                HStack(spacing: 4) {
+
+                Section("App Icon") {
+                    ForEach(AppLogoStyle.allCases) { style in
+                        Button {
+                            appState.appLogoStyle = style
+                        } label: {
+                            HStack {
+                                Text(style.rawValue)
+                                if appState.appLogoStyle == style {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 13))
+                    .foregroundColor(GlassTheme.textSecondary)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 28, height: 28)
+            .help("Display options")
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 50)
+        .background(Color.black.opacity(0.16))
+    }
+
+    private var throughputStrip: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.down")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(GlassTheme.cyanSapphire)
+                Text(SpeedFormatter.formatSpeed(appState.smoothedDownloadBps))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .foregroundColor(.white)
+            }
+
+            Rectangle()
+                .fill(GlassTheme.separator)
+                .frame(width: 1, height: 14)
+
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(GlassTheme.emeraldGreen)
+                Text(SpeedFormatter.formatSpeed(appState.smoothedUploadBps))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .foregroundColor(.white)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(GlassTheme.controlFill)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(GlassTheme.controlBorder, lineWidth: 0.75)
+        )
+    }
+
+    @ViewBuilder
+    private var helperAuthorizationControl: some View {
+        if !appState.isAuthorized {
+            Button {
+                Task {
+                    await appState.requestUpfrontAuthorization()
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "lock.shield")
+                        .font(.system(size: 11.5))
+                    Text("Authorize Once")
+                }
+            }
+            .buttonStyle(GlowingButtonStyle(accentColor: GlassTheme.cyanSapphire, isProminent: false))
+            .help("Install NetBoost's privileged macOS helper service once so no further password prompts appear")
+        } else {
+            Button {
+                showHelperPopover.toggle()
+            } label: {
+                HStack(spacing: 5) {
                     Image(systemName: "checkmark.shield.fill")
-                        .font(.system(size: 11))
+                        .font(.system(size: 11.5))
                         .foregroundColor(GlassTheme.emeraldGreen)
                     Text("Authorized")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(GlassTheme.emeraldGreen)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .lineLimit(1)
+                        .foregroundColor(.white)
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(GlassTheme.emeraldGreen.opacity(0.12))
                 .clipShape(Capsule())
-                .help("NetBoost privileged helper session is active")
+                .fixedSize(horizontal: true, vertical: false)
+                .overlay(
+                    Capsule().strokeBorder(GlassTheme.emeraldGreen.opacity(0.32), lineWidth: 0.75)
+                )
             }
-
-            // Active Environment Status Pill
-            StatusPill(
-                text: appState.activeStatePill,
-                color: environmentColor(appState.activeEnvironment)
-            )
-
-            // Auto-Fix Button & Compact Summary Pill
-            HStack(spacing: 8) {
-                if let summary = appState.autoFixSummary {
-                    HStack(spacing: 4) {
-                        Image(systemName: summary.contains("error") ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
-                        Text(summary.contains("error") ? "Fix Failed" : "Fixed")
-                            .font(.system(size: 11, weight: .bold))
-                    }
-                    .foregroundColor(summary.contains("error") ? GlassTheme.redAlert : GlassTheme.emeraldGreen)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background((summary.contains("error") ? GlassTheme.redAlert : GlassTheme.emeraldGreen).opacity(0.12))
-                    .clipShape(Capsule())
-                    .help(summary)
-                }
-
-                Button {
-                    Task {
-                        await appState.executeAutoFix()
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        if appState.isAutoFixRunning {
-                            ProgressView()
-                                .controlSize(.small)
-                                .colorScheme(.dark)
-                        } else {
-                            Image(systemName: "bolt.fill")
-                                .font(.system(size: 12))
-                        }
-                        Text(appState.isAutoFixRunning ? "Fixing..." : "⚡ Auto-Fix")
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    }
-                }
-                .buttonStyle(GlowingButtonStyle(accentColor: GlassTheme.amberWarning, isProminent: true))
-                .disabled(appState.isAutoFixRunning)
-
-                // Status Bar & Logo Customization Menu
-                Menu {
-                    Section("Status Bar Style") {
-                        ForEach(MenuBarIconStyle.allCases) { style in
-                            Button {
-                                appState.menuBarIconStyle = style
-                            } label: {
-                                HStack {
-                                    Text(style.rawValue)
-                                    if appState.menuBarIconStyle == style {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Section("App Logo Style") {
-                        ForEach(AppLogoStyle.allCases) { style in
-                            Button {
-                                appState.appLogoStyle = style
-                            } label: {
-                                HStack {
-                                    Text(style.rawValue)
-                                    if appState.appLogoStyle == style {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } label: {
-                    Image(systemName: "paintpalette.fill")
-                        .font(.system(size: 13))
+            .buttonStyle(.plain)
+            .popover(isPresented: $showHelperPopover, arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Privileged Helper Active")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Authorized via macOS LaunchDaemon so network tuning, routing, and hotspot actions run without repeat prompts.")
+                        .font(.system(size: 11.5))
                         .foregroundColor(GlassTheme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Button("Re-check") {
+                            Task {
+                                await appState.refreshAuthorizationStatus()
+                            }
+                        }
+                        Spacer()
+                        Button("Uninstall Helper") {
+                            showHelperPopover = false
+                            Task {
+                                await appState.uninstallPrivilegedHelper()
+                            }
+                        }
+                        .foregroundColor(GlassTheme.redAlert)
+                    }
+                    .controlSize(.small)
                 }
-                .menuStyle(.borderlessButton)
-                .frame(width: 24, height: 24)
-                .help("Customize Status Bar and Logo style")
+                .padding(14)
+                .frame(width: 280)
             }
+            .help("Privileged helper daemon is active")
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(GlassTheme.backgroundDark.opacity(0.4))
-        .overlay(
-            Rectangle()
-                .frame(height: 1)
-                .foregroundColor(Color.white.opacity(0.08)),
-            alignment: .bottom
-        )
     }
 
     private func environmentColor(_ env: NetworkEnvironmentState) -> Color {

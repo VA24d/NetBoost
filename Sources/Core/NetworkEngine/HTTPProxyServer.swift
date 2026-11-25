@@ -69,13 +69,40 @@ public final class HTTPProxyServer: @unchecked Sendable {
         let target = parts[1]
 
         if method == "CONNECT" {
-            guard !target.hasPrefix(":"), !target.hasSuffix(":") else { return .invalid }
-            let hostPort = target.split(separator: ":")
+            if target.hasPrefix("[") {
+                guard let closeBracket = target.firstIndex(of: "]") else { return .invalid }
+                let host = String(target[target.index(after: target.startIndex)..<closeBracket])
+                guard !host.isEmpty else { return .invalid }
+
+                let remainder = target[target.index(after: closeBracket)...]
+                let port: Int
+                if remainder.isEmpty {
+                    port = 443
+                } else if remainder.hasPrefix(":") {
+                    let portStr = remainder.dropFirst()
+                    guard !portStr.isEmpty,
+                          let parsedPort = Int(portStr),
+                          (1...65535).contains(parsedPort) else {
+                        return .invalid
+                    }
+                    port = parsedPort
+                } else {
+                    return .invalid
+                }
+                return .connect(host: host, port: port)
+            }
+
+            guard !target.contains("["), !target.contains("]"),
+                  !target.hasPrefix(":"), !target.hasSuffix(":") else {
+                return .invalid
+            }
+            let hostPort = target.split(separator: ":", omittingEmptySubsequences: false)
             guard let hostSub = hostPort.first, !hostSub.isEmpty else { return .invalid }
+            guard hostPort.count <= 2 else { return .invalid }
             let host = String(hostSub)
             let port: Int
-            if hostPort.count > 1 {
-                guard let parsedPort = Int(hostPort[1]), parsedPort >= 1 && parsedPort <= 65535 else {
+            if hostPort.count == 2 {
+                guard let parsedPort = Int(hostPort[1]), (1...65535).contains(parsedPort) else {
                     return .invalid
                 }
                 port = parsedPort
@@ -209,42 +236,25 @@ public final class HTTPProxyServer: @unchecked Sendable {
     // MARK: - Accept Loop
 
     private func runAcceptLoop() async {
-        while isRunning {
-            var clientAddr = sockaddr_in()
-            var clientAddrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        while isRunning && !Task.isCancelled {
+            let currentListenerFd = lock.withLock { listenerFd }
+            guard currentListenerFd >= 0 else { break }
 
-            let clientFd = withUnsafeMutablePointer(to: &clientAddr) { ptr in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                    Darwin.accept(listenerFd, sa, &clientAddrLen)
-                }
+            guard let accepted = await ProxySocketIO.acceptNext(
+                listenerFd: currentListenerFd,
+                isRunning: { [weak self] in self?.isRunning ?? false }
+            ) else {
+                if !isRunning || Task.isCancelled { break }
+                continue
             }
 
-            guard clientFd >= 0 else {
-                if !isRunning { break }
-                if errno == EWOULDBLOCK || errno == EAGAIN {
-                    try? await Task.sleep(nanoseconds: 20_000_000)
-                    continue
-                }
-                break
-            }
-
-            // Clear O_NONBLOCK inherited from listener so client socket has blocking I/O with timeouts
-            let clientFlags = fcntl(clientFd, F_GETFL, 0)
-            _ = fcntl(clientFd, F_SETFL, clientFlags & ~O_NONBLOCK)
-
-            var one: Int32 = 1
-            setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-
-            var tv = timeval(tv_sec: 15, tv_usec: 0)
-            setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-            setsockopt(clientFd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-
-            let clientIP = String(cString: inet_ntoa(clientAddr.sin_addr))
-            let clientPort = Int(UInt16(bigEndian: clientAddr.sin_port))
-            let clientDesc = "\(clientIP):\(clientPort)"
-
+            let iface = targetInterface
             Task { [weak self] in
-                await self?.handleClient(clientFd: clientFd, clientDesc: clientDesc, interface: self?.targetInterface ?? "en10")
+                await self?.handleClient(
+                    clientFd: accepted.clientFd,
+                    clientDesc: accepted.clientDesc,
+                    interface: iface
+                )
             }
         }
     }
@@ -252,43 +262,93 @@ public final class HTTPProxyServer: @unchecked Sendable {
     // MARK: - Client Request Handling
 
     public func handleClient(clientFd: Int32, clientDesc: String, interface: String) async {
+        await handleClient(
+            clientFd: clientFd,
+            clientDesc: clientDesc,
+            interface: interface,
+            onTargetConnected: nil,
+            onBytesTransferred: nil
+        )
+    }
+
+    internal func handleClient(
+        clientFd: Int32,
+        clientDesc: String,
+        interface: String,
+        onTargetConnected: (@Sendable (String, Int, ProxyProtocolType, Int32) -> Void)?,
+        onBytesTransferred: (@Sendable (Int64, Int64) -> Void)?
+    ) async {
         defer { Darwin.close(clientFd) }
 
-        // Read HTTP headers (enforcing 64KB max header size)
-        var headerData = Data()
-        var buffer = [UInt8](repeating: 0, count: 1024)
-        var delimiterRange: Range<Data.Index>? = nil
-        let delimiter = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
+        enum HeaderReadOutcome {
+            case parsed(RequestType, headerString: String, extraBodyData: Data)
+            case finished
+        }
 
-        while headerData.count < Self.maxHeaderSize {
-            let n = Darwin.read(clientFd, &buffer, buffer.count)
-            guard n > 0 else { break }
+        let outcome: HeaderReadOutcome = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                var rawBuffer = Data()
+                var readBuf = [UInt8](repeating: 0, count: 1024)
+                var delimiterRange: Range<Data.Index>? = nil
+                let delimiter = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
 
-            headerData.append(buffer, count: n)
-            if let range = headerData.range(of: delimiter) {
-                delimiterRange = range
-                break
+                while rawBuffer.count < Self.maxHeaderSize {
+                    let n = Darwin.read(clientFd, &readBuf, readBuf.count)
+                    if n < 0 && errno == EINTR { continue }
+                    guard n > 0 else { break }
+
+                    rawBuffer.append(readBuf, count: n)
+                    if let range = rawBuffer.range(of: delimiter) {
+                        delimiterRange = range
+                        break
+                    }
+                }
+
+                if rawBuffer.count >= Self.maxHeaderSize && delimiterRange == nil {
+                    let resp = Self.makePayloadTooLargeResponse()
+                    _ = ProxySocketIO.writeAll(fd: clientFd, data: Data(resp.utf8))
+                    continuation.resume(returning: .finished)
+                    return
+                }
+
+                guard let dRange = delimiterRange else {
+                    if !rawBuffer.isEmpty {
+                        let resp = Self.makeBadRequestResponse()
+                        _ = ProxySocketIO.writeAll(fd: clientFd, data: Data(resp.utf8))
+                    }
+                    continuation.resume(returning: .finished)
+                    return
+                }
+
+                // Split BEFORE UTF-8 decoding so arbitrary binary POST payloads are preserved intact
+                let headerOnlyBytes = rawBuffer.subdata(in: 0..<dRange.lowerBound)
+                let extraBodyData = rawBuffer.subdata(in: dRange.upperBound..<rawBuffer.count)
+
+                guard let rawHeaderString = String(data: headerOnlyBytes, encoding: .utf8) else {
+                    let resp = Self.makeBadRequestResponse()
+                    _ = ProxySocketIO.writeAll(fd: clientFd, data: Data(resp.utf8))
+                    continuation.resume(returning: .finished)
+                    return
+                }
+
+                let parsed = Self.parseRequest(rawHeaderString)
+                if case .invalid = parsed {
+                    let resp = Self.makeBadRequestResponse()
+                    _ = ProxySocketIO.writeAll(fd: clientFd, data: Data(resp.utf8))
+                    continuation.resume(returning: .finished)
+                    return
+                }
+
+                continuation.resume(returning: .parsed(parsed, headerString: rawHeaderString, extraBodyData: extraBodyData))
             }
         }
 
-        if headerData.count >= Self.maxHeaderSize && delimiterRange == nil {
-            let resp = Self.makePayloadTooLargeResponse()
-            _ = writeAll(fd: clientFd, data: Data(resp.utf8))
+        guard case .parsed(let parsed, let rawHeaderString, let extraBodyData) = outcome else {
             return
         }
-
-        guard let rawHeaderString = String(data: headerData, encoding: .utf8) else {
-            let resp = Self.makeBadRequestResponse()
-            _ = writeAll(fd: clientFd, data: Data(resp.utf8))
-            return
-        }
-
-        let parsed = Self.parseRequest(rawHeaderString)
 
         switch parsed {
         case .invalid:
-            let resp = Self.makeBadRequestResponse()
-            _ = writeAll(fd: clientFd, data: Data(resp.utf8))
             return
 
         case .connect(let host, let port):
@@ -297,7 +357,10 @@ public final class HTTPProxyServer: @unchecked Sendable {
                 clientDesc: clientDesc,
                 host: host,
                 port: port,
-                interface: interface
+                extraBodyData: extraBodyData,
+                interface: interface,
+                onTargetConnected: onTargetConnected,
+                onBytesTransferred: onBytesTransferred
             )
 
         case .standard(let method, let urlStr, let keepAlive):
@@ -308,9 +371,10 @@ public final class HTTPProxyServer: @unchecked Sendable {
                 urlStr: urlStr,
                 keepAlive: keepAlive,
                 rawHeaderString: rawHeaderString,
-                headerData: headerData,
-                delimiterRange: delimiterRange,
-                interface: interface
+                extraBodyData: extraBodyData,
+                interface: interface,
+                onTargetConnected: onTargetConnected,
+                onBytesTransferred: onBytesTransferred
             )
         }
     }
@@ -322,45 +386,77 @@ public final class HTTPProxyServer: @unchecked Sendable {
         clientDesc: String,
         host: String,
         port: Int,
-        interface: String
+        extraBodyData: Data,
+        interface: String,
+        onTargetConnected: (@Sendable (String, Int, ProxyProtocolType, Int32) -> Void)?,
+        onBytesTransferred: (@Sendable (Int64, Int64) -> Void)?
     ) async {
-        let connResult = connectOutbound(host: host, port: port, targetInterface: interface)
-        switch connResult {
-        case .failure(let errMsg):
-            let resp = Self.makeGatewayTimeoutResponse(message: "Gateway Timeout: \(errMsg)")
-            _ = writeAll(fd: clientFd, data: Data(resp.utf8))
-            return
+        let targetFdOpt: Int32? = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                switch self.connectOutbound(host: host, port: port, targetInterface: interface) {
+                case .failure(let errMsg):
+                    let resp = Self.makeGatewayTimeoutResponse(message: "Gateway Timeout: \(errMsg)")
+                    _ = ProxySocketIO.writeAll(fd: clientFd, data: Data(resp.utf8))
+                    continuation.resume(returning: nil)
 
-        case .success(let targetFd):
-            defer { Darwin.close(targetFd) }
-
-            let successResponse = Self.makeConnectSuccessResponse()
-            guard writeAll(fd: clientFd, data: Data(successResponse.utf8)) else { return }
-
-            let connId = UUID()
-            let connInfo = ProxyConnectionInfo(
-                id: connId,
-                port: self.port,
-                clientAddress: clientDesc,
-                targetHost: host,
-                targetPort: port,
-                egressInterface: interface,
-                protocolType: .httpConnect
-            )
-
-            lock.withLock {
-                activeConns[connId] = (connInfo, clientFd, targetFd)
-            }
-
-            defer {
-                lock.withLock {
-                    _ = activeConns.removeValue(forKey: connId)
+                case .success(let targetFd):
+                    let successResponse = Self.makeConnectSuccessResponse()
+                    guard ProxySocketIO.writeAll(fd: clientFd, data: Data(successResponse.utf8)) else {
+                        Darwin.close(targetFd)
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    if !extraBodyData.isEmpty {
+                        guard ProxySocketIO.writeAll(fd: targetFd, data: extraBodyData) else {
+                            Darwin.close(targetFd)
+                            continuation.resume(returning: nil)
+                            return
+                        }
+                    }
+                    continuation.resume(returning: targetFd)
                 }
             }
-
-            // Stream raw bytes bidirectionally
-            await streamBidirectional(clientFd: clientFd, targetFd: targetFd)
         }
+
+        guard let targetFd = targetFdOpt else { return }
+        defer { Darwin.close(targetFd) }
+
+        let connId = UUID()
+        let initialReadBytes = Int64(extraBodyData.count)
+        let connInfo = ProxyConnectionInfo(
+            id: connId,
+            port: self.port,
+            clientAddress: clientDesc,
+            targetHost: host,
+            targetPort: port,
+            egressInterface: interface,
+            protocolType: .httpConnect,
+            bytesRead: initialReadBytes,
+            bytesWritten: 0
+        )
+
+        lock.withLock {
+            activeConns[connId] = (connInfo, clientFd, targetFd)
+            bytesReadCounter += initialReadBytes
+        }
+        onTargetConnected?(host, port, .httpConnect, targetFd)
+        if initialReadBytes > 0 {
+            onBytesTransferred?(initialReadBytes, 0)
+        }
+
+        defer {
+            lock.withLock {
+                _ = activeConns.removeValue(forKey: connId)
+            }
+        }
+
+        // Stream raw bytes bidirectionally
+        await streamBidirectional(
+            clientFd: clientFd,
+            targetFd: targetFd,
+            connId: connId,
+            onBytesTransferred: onBytesTransferred
+        )
     }
 
     // MARK: - Direct GET/POST Request Mode
@@ -372,13 +468,19 @@ public final class HTTPProxyServer: @unchecked Sendable {
         urlStr: String,
         keepAlive: Bool,
         rawHeaderString: String,
-        headerData: Data,
-        delimiterRange: Range<Data.Index>?,
-        interface: String
+        extraBodyData: Data,
+        interface: String,
+        onTargetConnected: (@Sendable (String, Int, ProxyProtocolType, Int32) -> Void)?,
+        onBytesTransferred: (@Sendable (Int64, Int64) -> Void)?
     ) async {
         guard let url = URL(string: urlStr), let host = url.host else {
-            let resp = Self.makeBadRequestResponse()
-            _ = writeAll(fd: clientFd, data: Data(resp.utf8))
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let resp = Self.makeBadRequestResponse()
+                    _ = ProxySocketIO.writeAll(fd: clientFd, data: Data(resp.utf8))
+                    continuation.resume()
+                }
+            }
             return
         }
 
@@ -388,11 +490,16 @@ public final class HTTPProxyServer: @unchecked Sendable {
             path += "?\(query)"
         }
 
-        // Rewrite headers: rewrite request line to origin-form, drop Proxy-Connection
+        // Rewrite headers ONLY (never touch raw extraBodyData): rewrite request line to origin-form, drop Proxy-Connection
         var lines = rawHeaderString.components(separatedBy: "\r\n")
         guard !lines.isEmpty else {
-            let resp = Self.makeBadRequestResponse()
-            _ = writeAll(fd: clientFd, data: Data(resp.utf8))
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let resp = Self.makeBadRequestResponse()
+                    _ = ProxySocketIO.writeAll(fd: clientFd, data: Data(resp.utf8))
+                    continuation.resume()
+                }
+            }
             return
         }
 
@@ -410,51 +517,73 @@ public final class HTTPProxyServer: @unchecked Sendable {
             }
         }
 
-        let rewrittenHeaders = filteredLines.joined(separator: "\r\n")
-        var outgoingData = Data(rewrittenHeaders.utf8)
-
-        // If client sent body data along with headers
-        if let dRange = delimiterRange, dRange.upperBound < headerData.count {
-            let extra = headerData.subdata(in: dRange.upperBound..<headerData.count)
-            outgoingData.append(extra)
-        }
-
-        let connResult = connectOutbound(host: host, port: targetPort, targetInterface: interface)
-        switch connResult {
-        case .failure(let errMsg):
-            let resp = Self.makeGatewayTimeoutResponse(message: "Gateway Timeout: \(errMsg)")
-            _ = writeAll(fd: clientFd, data: Data(resp.utf8))
-            return
-
-        case .success(let targetFd):
-            defer { Darwin.close(targetFd) }
-
-            guard writeAll(fd: targetFd, data: outgoingData) else { return }
-
-            let connId = UUID()
-            let connInfo = ProxyConnectionInfo(
-                id: connId,
-                port: self.port,
-                clientAddress: clientDesc,
-                targetHost: host,
-                targetPort: targetPort,
-                egressInterface: interface,
-                protocolType: .httpDirect
-            )
-
-            lock.withLock {
-                activeConns[connId] = (connInfo, clientFd, targetFd)
+        let rewrittenHeaders = filteredLines.joined(separator: "\r\n") + "\r\n\r\n"
+        let outgoingData: Data = {
+            var buffer = Data(rewrittenHeaders.utf8)
+            if !extraBodyData.isEmpty {
+                buffer.append(extraBodyData)
             }
+            return buffer
+        }()
 
-            defer {
-                lock.withLock {
-                    _ = activeConns.removeValue(forKey: connId)
+        let targetFdOpt: Int32? = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                switch self.connectOutbound(host: host, port: targetPort, targetInterface: interface) {
+                case .failure(let errMsg):
+                    let resp = Self.makeGatewayTimeoutResponse(message: "Gateway Timeout: \(errMsg)")
+                    _ = ProxySocketIO.writeAll(fd: clientFd, data: Data(resp.utf8))
+                    continuation.resume(returning: nil)
+
+                case .success(let targetFd):
+                    guard ProxySocketIO.writeAll(fd: targetFd, data: outgoingData) else {
+                        Darwin.close(targetFd)
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    continuation.resume(returning: targetFd)
                 }
             }
-
-            // Stream response back from target to client
-            await streamBidirectional(clientFd: clientFd, targetFd: targetFd)
         }
+
+        guard let targetFd = targetFdOpt else { return }
+        defer { Darwin.close(targetFd) }
+
+        let connId = UUID()
+        let initialSentBytes = Int64(outgoingData.count)
+        let connInfo = ProxyConnectionInfo(
+            id: connId,
+            port: self.port,
+            clientAddress: clientDesc,
+            targetHost: host,
+            targetPort: targetPort,
+            egressInterface: interface,
+            protocolType: .httpDirect,
+            bytesRead: initialSentBytes,
+            bytesWritten: 0
+        )
+
+        lock.withLock {
+            activeConns[connId] = (connInfo, clientFd, targetFd)
+            bytesReadCounter += initialSentBytes
+        }
+        onTargetConnected?(host, targetPort, .httpDirect, targetFd)
+        if initialSentBytes > 0 {
+            onBytesTransferred?(initialSentBytes, 0)
+        }
+
+        defer {
+            lock.withLock {
+                _ = activeConns.removeValue(forKey: connId)
+            }
+        }
+
+        // Stream remaining request body (if any) and response back from target to client
+        await streamBidirectional(
+            clientFd: clientFd,
+            targetFd: targetFd,
+            connId: connId,
+            onBytesTransferred: onBytesTransferred
+        )
     }
 
     // MARK: - Outbound Connection
@@ -465,115 +594,46 @@ public final class HTTPProxyServer: @unchecked Sendable {
         targetInterface: String,
         timeout: TimeInterval = 5.0
     ) -> OutboundConnectResult {
-        var hints = addrinfo()
-        hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = SOCK_STREAM
-        hints.ai_protocol = IPPROTO_TCP
-
-        var res: UnsafeMutablePointer<addrinfo>?
-        let portStr = String(port)
-        let gaiStatus = getaddrinfo(host, portStr, &hints, &res)
-        guard gaiStatus == 0, let addrList = res else {
-            return .failure("DNS resolution failed for \(host)")
-        }
-        defer { freeaddrinfo(res) }
-
-        var ptr: UnsafeMutablePointer<addrinfo>? = addrList
-        var lastErr: Int32 = ECONNREFUSED
-        var connectedFd: Int32 = -1
-
-        let isLoopback = host == "127.0.0.1" || host == "localhost" || host == "::1" || host.hasPrefix("127.")
-
-        while let current = ptr {
-            let info = current.pointee
-            ptr = current.pointee.ai_next
-
-            let fd = socket(info.ai_family, info.ai_socktype, info.ai_protocol)
-            guard fd >= 0 else {
-                lastErr = errno
-                continue
-            }
-
-            var one: Int32 = 1
-            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-
-            // Interface binding
-            if !isLoopback && !targetInterface.isEmpty && targetInterface != "auto" && targetInterface != "any" {
-                if let ifIdx = DarwinSocketHelper.getInterfaceIndex(for: targetInterface) {
-                    _ = try? DarwinSocketHelper.bindSocket(fd: fd, toInterfaceIndex: ifIdx)
-                }
-            } else if targetInterface == "lo0" {
-                if let loIdx = DarwinSocketHelper.getInterfaceIndex(for: "lo0") {
-                    _ = try? DarwinSocketHelper.bindSocket(fd: fd, toInterfaceIndex: loIdx)
-                }
-            }
-
-            var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
-            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-
-            let connRes = Darwin.connect(fd, info.ai_addr, info.ai_addrlen)
-            if connRes == 0 {
-                connectedFd = fd
-                break
-            } else {
-                lastErr = errno
-                Darwin.close(fd)
-            }
-        }
-
-        if connectedFd >= 0 {
-            return .success(connectedFd)
-        } else {
-            let msg = String(cString: strerror(lastErr))
+        switch ProxySocketIO.connectOutbound(
+            host: host,
+            port: port,
+            targetInterface: targetInterface,
+            timeout: timeout
+        ) {
+        case .success(let fd):
+            return .success(fd)
+        case .failure(let err):
+            let msg = String(cString: strerror(err))
             return .failure("Connection refused or timed out: \(msg)")
         }
     }
 
     // MARK: - Streaming & Helpers
 
-    private func streamBidirectional(clientFd: Int32, targetFd: Int32) async {
-        await withTaskGroup(of: Int64.self) { group in
-            group.addTask {
-                let bytes = SOCKS5Server.pump(from: clientFd, to: targetFd)
-                _ = shutdown(targetFd, SHUT_WR)
-                return bytes
-            }
-
-            group.addTask {
-                let bytes = SOCKS5Server.pump(from: targetFd, to: clientFd)
-                _ = shutdown(clientFd, SHUT_WR)
-                return bytes
-            }
-
-            var totalClientToTarget: Int64 = 0
-            var totalTargetToClient: Int64 = 0
-            for await bytes in group {
-                if totalClientToTarget == 0 {
-                    totalClientToTarget = bytes
-                } else {
-                    totalTargetToClient = bytes
-                }
-            }
-
-            lock.withLock {
-                bytesReadCounter += totalClientToTarget
-                bytesWrittenCounter += totalTargetToClient
-            }
-        }
+    private func streamBidirectional(
+        clientFd: Int32,
+        targetFd: Int32,
+        connId: UUID,
+        onBytesTransferred: (@Sendable (Int64, Int64) -> Void)?
+    ) async {
+        await ProxySocketIO.streamAndTrack(
+            clientFd: clientFd,
+            targetFd: targetFd,
+            recordBytes: { [weak self] readDelta, writeDelta in
+                self?.recordBytes(connId: connId, readDelta: readDelta, writeDelta: writeDelta)
+            },
+            onBytesTransferred: onBytesTransferred
+        )
     }
 
-    private func writeAll(fd: Int32, data: Data) -> Bool {
-        var bytesWritten = 0
-        let total = data.count
-        while bytesWritten < total {
-            let n = data.withUnsafeBytes { ptr -> Int in
-                guard let base = ptr.baseAddress else { return -1 }
-                return Darwin.write(fd, base.advanced(by: bytesWritten), total - bytesWritten)
+    private func recordBytes(connId: UUID, readDelta: Int64, writeDelta: Int64) {
+        lock.withLock {
+            bytesReadCounter += readDelta
+            bytesWrittenCounter += writeDelta
+            if let existing = activeConns[connId] {
+                let updated = ProxySocketIO.makeUpdatedConnectionInfo(existing.info, readDelta: readDelta, writeDelta: writeDelta)
+                activeConns[connId] = (updated, existing.clientFd, existing.targetFd)
             }
-            if n <= 0 { return false }
-            bytesWritten += n
         }
-        return true
     }
 }
