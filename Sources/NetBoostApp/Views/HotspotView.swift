@@ -71,12 +71,21 @@ public struct HotspotView: View {
             )
         }
 
-        if !appState.canEnableHotspot {
+        if appState.isUpstreamProtectedBy8021X {
+            bannerView(
+                icon: "lock.shield.fill",
+                tint: GlassTheme.amberWarning,
+                title: "802.1X Protected Uplink (\(appState.upstreamInterface))",
+                message: "Apple's configd blocks macOS Wi-Fi Internet Sharing while 802.1X (eapolclient) is active on \(appState.upstreamInterface). Use the local Proxy Dispatcher or switch to a non-802.1X Ethernet/USB adapter.",
+                actionTitle: "Open Proxy Dispatcher",
+                action: { appState.selectedTab = .dispatcher }
+            )
+        } else if !appState.canEnableHotspot {
             bannerView(
                 icon: "cable.connector.slash",
                 tint: GlassTheme.amberWarning,
                 title: "Wired Ethernet uplink required",
-                message: "Connect and authenticate wired Ethernet (en10) to enable Wi-Fi sharing.",
+                message: "Connect a non-802.1X wired Ethernet or USB adapter to enable Wi-Fi sharing.",
                 actionTitle: "Sharing Settings",
                 action: { appState.openSystemSharingSettings() }
             )
@@ -156,8 +165,38 @@ public struct HotspotView: View {
                 ))
                 .labelsHidden()
                 .toggleStyle(.switch)
-                .disabled(!appState.canEnableHotspot || isToggling)
-                .help(appState.canEnableHotspot ? "Enable or stop NAT sharing" : "Requires active wired Ethernet (en10)")
+                .disabled((!appState.canEnableHotspot && !appState.isHotspotActive) || isToggling)
+                .help(hotspotToggleHelpText)
+            }
+
+            if appState.shareableUpstreamInterfaces.count > 1 {
+                HStack(spacing: 10) {
+                    Text("Upstream adapter")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(GlassTheme.textSecondary)
+
+                    Picker("Upstream adapter", selection: Binding(
+                        get: { appState.upstreamInterface },
+                        set: { appState.selectUpstreamInterface($0) }
+                    )) {
+                        ForEach(appState.shareableUpstreamInterfaces) { iface in
+                            let tag = appState.dot1XProtectedInterfaces.contains(iface.bsdName) ? "802.1X" : "Ready"
+                            Text("\(iface.displayName) (\(iface.bsdName)) — \(tag)")
+                                .tag(iface.bsdName)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .disabled(appState.isHotspotActive)
+
+                    StatusPill(
+                        text: appState.isUpstreamProtectedBy8021X ? "802.1X" : "Ready",
+                        color: appState.isUpstreamProtectedBy8021X ? GlassTheme.amberWarning : GlassTheme.emeraldGreen,
+                        showPulse: false
+                    )
+
+                    Spacer(minLength: 0)
+                }
             }
 
             if appState.isHotspotActive {
@@ -182,7 +221,7 @@ public struct HotspotView: View {
                         RoundedRectangle(cornerRadius: 9, style: .continuous)
                             .strokeBorder(GlassTheme.emeraldGreen.opacity(0.32), lineWidth: 0.75)
                     )
-                } else {
+                } else if !appState.isUpstreamProtectedBy8021X {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(spacing: 8) {
                             Image(systemName: "antenna.radiowaves.left.and.right")
@@ -230,20 +269,33 @@ public struct HotspotView: View {
             }
 
             HStack {
-                Button {
-                    appState.openSystemSharingSettings()
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "gearshape")
-                            .font(.system(size: 11.5))
-                        Text("Open System Sharing Settings")
+                if appState.isUpstreamProtectedBy8021X {
+                    Button {
+                        appState.selectedTab = .dispatcher
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.triangle.branch")
+                                .font(.system(size: 11.5))
+                            Text("Open Proxy Dispatcher")
+                        }
                     }
+                    .buttonStyle(GlowingButtonStyle(accentColor: GlassTheme.cyanSapphire))
+                } else {
+                    Button {
+                        appState.openSystemSharingSettings()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "gearshape")
+                                .font(.system(size: 11.5))
+                            Text("Open System Sharing Settings")
+                        }
+                    }
+                    .buttonStyle(GlowingButtonStyle())
                 }
-                .buttonStyle(GlowingButtonStyle())
 
                 Spacer()
 
-                Text("Enterprise 802.1X Wi-Fi cannot act as an access point simultaneously; wired \(appState.upstreamInterface) supplies the uplink.")
+                Text("macOS Internet Sharing supports non-802.1X Ethernet or USB uplinks; 802.1X (eapolclient) interfaces are blocked by configd — use Proxy Dispatcher instead.")
                     .font(.system(size: 11))
                     .foregroundColor(GlassTheme.textTertiary)
                     .lineLimit(2)
@@ -559,12 +611,31 @@ public struct HotspotView: View {
 
     // MARK: - Helpers
 
+    private var hotspotToggleHelpText: String {
+        if appState.isUpstreamProtectedBy8021X {
+            return "Blocked by active 802.1X (eapolclient) on \(appState.upstreamInterface)"
+        }
+        if !appState.canEnableHotspot && !appState.isHotspotActive {
+            return "Requires active non-802.1X wired Ethernet or USB uplink"
+        }
+        return "Enable or stop NAT sharing"
+    }
+
     private var hotspotStatusText: String {
+        if appState.isUpstreamProtectedBy8021X && !appState.isHotspotActive {
+            return "802.1X Locked"
+        }
         guard appState.isHotspotActive else { return "Off" }
-        return appState.isRadioBroadcasting ? "Broadcasting" : "Waiting for macOS"
+        if appState.isRadioBroadcasting {
+            return "Broadcasting"
+        }
+        return appState.isUpstreamProtectedBy8021X ? "802.1X Locked" : "Waiting for macOS"
     }
 
     private var hotspotStatusColor: Color {
+        if appState.isUpstreamProtectedBy8021X {
+            return GlassTheme.amberWarning
+        }
         guard appState.isHotspotActive else { return GlassTheme.textTertiary }
         return appState.isRadioBroadcasting ? GlassTheme.emeraldGreen : GlassTheme.amberWarning
     }

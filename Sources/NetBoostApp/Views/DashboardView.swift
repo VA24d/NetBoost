@@ -97,7 +97,7 @@ public struct DashboardView: View {
                     icon: "personalhotspot",
                     title: "Hotspot",
                     status: hotspotStageStatus,
-                    detail: "\(appState.connectedClients.count) \(appState.connectedClients.count == 1 ? "client" : "clients")",
+                    detail: hotspotStageDetail,
                     accentColor: hotspotStageColor,
                     isActive: appState.isHotspotActive,
                     destination: .hotspot
@@ -189,8 +189,8 @@ public struct DashboardView: View {
                     icon: "personalhotspot",
                     statusText: hotspotStageStatus,
                     statusColor: hotspotStageColor,
-                    metric: "\(appState.connectedClients.count) \(appState.connectedClients.count == 1 ? "client" : "clients")",
-                    detail: "\(appState.upstreamInterface) to \(appState.downstreamInterface)",
+                    metric: hotspotQuickMetric,
+                    detail: hotspotQuickDetail,
                     tab: .hotspot
                 )
 
@@ -548,13 +548,52 @@ public struct DashboardView: View {
     }
 
     private var hotspotStageStatus: String {
+        if appState.isUpstreamProtectedBy8021X && !appState.isHotspotActive {
+            return "Blocked (802.1X)"
+        }
+        if !appState.canEnableHotspot && !appState.isHotspotActive {
+            return "Unavailable"
+        }
         guard appState.isHotspotActive else { return "Off" }
-        return appState.isRadioBroadcasting ? "Broadcasting" : "Waiting for macOS"
+        if appState.isRadioBroadcasting {
+            return "Broadcasting"
+        }
+        return appState.isUpstreamProtectedBy8021X ? "Blocked (802.1X)" : "Waiting for macOS"
     }
 
     private var hotspotStageColor: Color {
+        if appState.isUpstreamProtectedBy8021X {
+            return GlassTheme.amberWarning
+        }
         guard appState.isHotspotActive else { return GlassTheme.textTertiary }
         return appState.isRadioBroadcasting ? GlassTheme.emeraldGreen : GlassTheme.amberWarning
+    }
+
+    private var hotspotStageDetail: String {
+        if appState.isUpstreamProtectedBy8021X {
+            return "\(appState.upstreamInterface) · 802.1X"
+        }
+        return "\(appState.connectedClients.count) \(appState.connectedClients.count == 1 ? "client" : "clients")"
+    }
+
+    private var hotspotQuickMetric: String {
+        if appState.isUpstreamProtectedBy8021X {
+            return "eapolclient active"
+        }
+        if !appState.canEnableHotspot && !appState.isHotspotActive {
+            return "No ready uplink"
+        }
+        return "\(appState.connectedClients.count) \(appState.connectedClients.count == 1 ? "client" : "clients")"
+    }
+
+    private var hotspotQuickDetail: String {
+        if appState.isUpstreamProtectedBy8021X {
+            return "Use Proxy Dispatcher or non-802.1X uplink"
+        }
+        if !appState.canEnableHotspot && !appState.isHotspotActive {
+            return "Requires non-802.1X wired Ethernet"
+        }
+        return "\(appState.upstreamInterface) to \(appState.downstreamInterface)"
     }
 
     private var doctorSummaryMetric: String {

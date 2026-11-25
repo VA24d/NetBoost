@@ -1,6 +1,6 @@
 # NetBoost architecture
 
-NetBoost splits core engines, desktop UI, and root tools across three Swift 6 targets. The package builds with Swift Package Manager for macOS 14 and newer.
+NetBoost splits core engines, desktop UI, and root tools across three Swift 6 targets built with Swift Package Manager for macOS 27 (Golden Gate).
 
 ## Package targets
 
@@ -64,7 +64,7 @@ Tests/                  AppTests/, CoreTests/, DiagnosticsTests/, DownloaderTest
 
 ### Hotspot NAT (`HotspotNATController`)
 
-`HotspotNATController` writes rules into the `netboost` and `com.apple/netboost` PF anchor files and checks syntax with `pfctl -nf`. It imports `com.apple.nat` XML plists validated by `plutil -lint`. If `bridge100` already controls `en0`, setup skips the alias step. Connected devices come from `/var/db/dhcpd_leases` merged with `ARPScanner` results.
+`HotspotNATController` checks `/bin/ps` for active `eapolclient` processes before starting SoftAP sharing. Non-802.1X uplinks win. On eligible uplinks, it writes rules into the `netboost` and `com.apple/netboost` PF anchor files and checks syntax with `pfctl -nf`. It imports `com.apple.nat` XML plists validated by `plutil -lint`. When `bridge100` and `ap1` stay down after startup, the helper rolls back NAT rules, PF anchor rules, and IP forwarding. For 802.1X-locked interfaces, the UI routes apps to `127.0.0.1:1080` in Proxy Dispatcher. Client leases come from `/var/db/dhcpd_leases` and `ARPScanner`.
 
 ### VPN automation (`NetworkSensor` and `PassepartoutController`)
 
@@ -72,7 +72,7 @@ Tests/                  AppTests/, CoreTests/, DiagnosticsTests/, DownloaderTest
 
 ### Downloader, diagnostics, and AI bridge
 
-`DownloadManager` coordinates `RangeProbe`, `ChunkPartitionEngine`, `ChunkWorker`, `DiskAssembler`, and `ChecksumValidator`. Workers stream HTTP byte ranges in 64 KB buffers, keeping memory flat.
+`DownloadManager` coordinates `RangeProbe`, `ChunkPartitionEngine`, `ChunkWorker`, `DiskAssembler`, and `ChecksumValidator`. Workers stream HTTP byte ranges in 64 KB buffers. Memory stays flat.
 
 `CampusDoctor` runs `RepairRoutines`, `MTUManager`, `ServiceOrderManager`, `LatencyProbe`, and `CaptivePortalDetector`. Repair commands quote multi-word service names safely. Separately, `LLMDoctorBridge` queries `/v1/models` and `/v1/chat/completions` on LM Studio. Proposed tool calls wait for user approval.
 

@@ -7,7 +7,21 @@ extension AppState {
     // MARK: - Hotspot Actions
 
     public var canEnableHotspot: Bool {
-        upstreamInterface == "en10" || activeEnvironment.isCampusLAN || (activeEnvironment.primaryInterface == "en10")
+        guard !isUpstreamProtectedBy8021X else { return false }
+        guard upstreamInterface != downstreamInterface,
+              upstreamInterface != "en0",
+              HotspotNATController.isEligibleHotspotInterface(upstreamInterface) else {
+            return false
+        }
+        if shareableUpstreamInterfaces.contains(where: { $0.bsdName == upstreamInterface }) {
+            return true
+        }
+        if !hardwareInterfaces.isEmpty {
+            return false
+        }
+        return upstreamInterface == "en10"
+            || activeEnvironment.isCampusLAN
+            || activeEnvironment.primaryInterface == "en10"
     }
 
     public var hotspotPasswordValidationError: String? {
@@ -21,12 +35,6 @@ extension AppState {
     }
 
     public func toggleHotspot() async throws {
-        guard canEnableHotspot else {
-            hotspotError = "Hotspot sharing requires active Wired Ethernet (en10)."
-            appendRepairLog("Hotspot toggle failed: \(upstreamInterface) not active")
-            return
-        }
-
         if isHotspotActive {
             try await hotspotController.stopHotspot()
             isHotspotActive = false
@@ -34,28 +42,51 @@ extension AppState {
             connectedClients = []
             hotspotConfig.isActive = false
             appendRepairLog("Hotspot stopped on \(downstreamInterface)")
-        } else {
-            if let validationErr = hotspotPasswordValidationError {
-                hotspotError = validationErr
-                appendRepairLog("Hotspot configuration invalid: \(validationErr)")
-                return
-            }
-
-            hotspotConfig.upstreamInterface = upstreamInterface
-            hotspotConfig.interfaceName = downstreamInterface
-            hotspotConfig.ssid = hotspotSSID
-            hotspotConfig.password = hotspotPassword
-            hotspotConfig.securityType = hotspotSecurityType
-            hotspotController.updateConfiguration(hotspotConfig)
-
-            try await hotspotController.startHotspot(configuration: hotspotConfig)
-            await refreshAuthorizationStatus()
-            isHotspotActive = true
-            hotspotConfig.isActive = true
-            isRadioBroadcasting = await hotspotController.isRadioBroadcasting()
-            connectedClients = await hotspotController.connectedClients()
-            appendRepairLog("Hotspot started sharing \(upstreamInterface) -> \(downstreamInterface)")
+            hotspotError = nil
+            return
         }
+
+        guard canEnableHotspot else {
+            if isUpstreamProtectedBy8021X {
+                hotspotError = "macOS blocks Internet Sharing on \(upstreamInterface) because 802.1X (eapolclient) is active."
+                appendRepairLog("Hotspot blocked: 802.1X (eapolclient) active on \(upstreamInterface)")
+            } else {
+                hotspotError = "Hotspot sharing requires active Wired Ethernet (en10)."
+                appendRepairLog("Hotspot toggle failed: \(upstreamInterface) not active")
+            }
+            return
+        }
+
+        if let validationErr = hotspotPasswordValidationError {
+            hotspotError = validationErr
+            appendRepairLog("Hotspot configuration invalid: \(validationErr)")
+            return
+        }
+
+        hotspotConfig.upstreamInterface = upstreamInterface
+        hotspotConfig.interfaceName = downstreamInterface
+        hotspotConfig.ssid = hotspotSSID
+        hotspotConfig.password = hotspotPassword
+        hotspotConfig.securityType = hotspotSecurityType
+        hotspotController.updateConfiguration(hotspotConfig)
+
+        do {
+            try await hotspotController.startHotspot(configuration: hotspotConfig)
+        } catch {
+            isHotspotActive = false
+            isRadioBroadcasting = false
+            hotspotConfig.isActive = false
+            hotspotError = error.localizedDescription
+            appendRepairLog("Hotspot start failed: \(error.localizedDescription)")
+            throw error
+        }
+
+        await refreshAuthorizationStatus()
+        isHotspotActive = true
+        hotspotConfig.isActive = true
+        isRadioBroadcasting = await hotspotController.isRadioBroadcasting()
+        connectedClients = await hotspotController.connectedClients()
+        appendRepairLog("Hotspot started sharing \(upstreamInterface) -> \(downstreamInterface)")
         hotspotError = nil
     }
 
@@ -67,8 +98,16 @@ extension AppState {
     }
 
     public func refreshHotspotClients() async {
-        isRadioBroadcasting = await hotspotController.isRadioBroadcasting()
-        guard isHotspotActive || isRadioBroadcasting else { return }
+        let broadcasting = await hotspotController.isRadioBroadcasting()
+        isRadioBroadcasting = broadcasting
+        let controllerActive = (hotspotController as? HotspotNATController)?.isActive ?? isHotspotActive
+        if !broadcasting && !controllerActive {
+            isHotspotActive = false
+            hotspotConfig.isActive = false
+            connectedClients = []
+            return
+        }
+        guard isHotspotActive || broadcasting else { return }
         connectedClients = await hotspotController.connectedClients()
     }
 }

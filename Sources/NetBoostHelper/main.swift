@@ -187,27 +187,9 @@ private func disassociateDownstreamStation(_ downstream: String) {
     // Stop any 802.1X eapolclient bound only to the downstream Wi-Fi card; never touch wired upstream.
     let psOut = runBinary("/bin/ps", arguments: ["-axo", "pid=,args="])
     if psOut.succeeded {
-        for rawLine in psOut.stdout.components(separatedBy: .newlines) {
-            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty,
-                  let firstSpace = trimmed.firstIndex(where: { $0 == " " || $0 == "\t" }),
-                  let pid = Int32(trimmed[..<firstSpace]),
-                  pid > 1 else {
-                continue
-            }
-
-            let cmdPart = String(trimmed[firstSpace...]).trimmingCharacters(in: .whitespaces)
-            let tokens = cmdPart.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
-            guard let executable = tokens.first,
-                  executable == "eapolclient" || executable.hasSuffix("/eapolclient") else {
-                continue
-            }
-
-            let argTokens = tokens.dropFirst()
-            let matchesDownstream = argTokens.contains(where: { $0 == downstream || $0 == "-i\(downstream)" })
-            if matchesDownstream {
-                _ = Darwin.kill(pid, SIGTERM)
-            }
+        for entry in HotspotNATController.parseEAPOLClientProcesses(psOutput: psOut.stdout)
+        where entry.pid > 1 && entry.interface == downstream {
+            _ = Darwin.kill(entry.pid, SIGTERM)
         }
     }
 }
@@ -402,6 +384,15 @@ private func handleHotspotStart(_ args: [String]) -> HelperResponse {
         }
     }
 
+    // macOS Internet Sharing / configd blocks SoftAP on any IEEE 802.1X-authenticated upstream interface.
+    if HotspotNATController.detectActive8021XInterfaces().contains(upstream) {
+        disableNATPreferences()
+        return HelperResponse(
+            exitCode: 1,
+            stderr: "macOS blocks Internet Sharing on \(upstream) because IEEE 802.1X authentication (eapolclient) is active. Switch to a non-802.1X uplink or use Proxy Dispatcher (127.0.0.1:1080)."
+        )
+    }
+
     // Clear station 802.1X state on downstream Wi-Fi and ensure upstream wired LAN sits first with full MTU.
     disassociateDownstreamStation(downstream)
     _ = runBinary("/sbin/ifconfig", arguments: [downstream, "-alias", gateway])
@@ -457,11 +448,30 @@ private func handleHotspotStart(_ args: [String]) -> HelperResponse {
     _ = runBinary("/bin/launchctl", arguments: ["kickstart", "-k", "system/com.apple.NetworkSharing"])
 
     // Wait briefly for macOS InternetSharing to spin up bridge100/ap1 before configuring PF anchors.
-    for _ in 0..<10 {
+    var broadcasting = false
+    for _ in 0..<17 {
         if DarwinSocketHelper.isInterfaceActive("bridge100") || DarwinSocketHelper.isInterfaceActive("ap1") {
+            broadcasting = true
             break
         }
         usleep(150_000)
+    }
+
+    let rollbackHotspotSetup: (String, String) -> Void = { anchor, appleAnchor in
+        disableNATPreferences()
+        _ = runBinary("/bin/launchctl", arguments: ["stop", "com.apple.NetworkSharing"])
+        _ = flushPFAnchor(anchor)
+        _ = flushPFAnchor(appleAnchor)
+        _ = runBinary("/sbin/ifconfig", arguments: [downstream, "-alias", gateway])
+        _ = runBinary("/usr/sbin/sysctl", arguments: ["-w", "net.inet.ip.forwarding=0"])
+    }
+
+    guard broadcasting else {
+        rollbackHotspotSetup("netboost", "com.apple/netboost")
+        return HelperResponse(
+            exitCode: 1,
+            stderr: "macOS Internet Sharing failed to start a SoftAP (bridge100/ap1 did not become active). Verify \(upstream) is eligible for Internet Sharing or use Proxy Dispatcher (127.0.0.1:1080)."
+        )
     }
 
     let activeBridgeSubnet = detectBridgeSubnet()
@@ -475,58 +485,50 @@ private func handleHotspotStart(_ args: [String]) -> HelperResponse {
     let additionalSubnets = (activeBridgeSubnet != nil && activeBridgeSubnet != subnet) ? [subnet] : []
     let rules = pfManager.generateNATRules(additionalSubnets: additionalSubnets) + "\n"
 
-    let rollbackHotspotSetup = {
-        disableNATPreferences()
-        _ = runBinary("/bin/launchctl", arguments: ["stop", "com.apple.NetworkSharing"])
-        _ = flushPFAnchor(pfManager.anchorName)
-        _ = flushPFAnchor(pfManager.appleAnchorName)
-    }
-
     do {
         try rules.write(toFile: rulesPath, atomically: true, encoding: .utf8)
     } catch {
-        rollbackHotspotSetup()
+        rollbackHotspotSetup(pfManager.anchorName, pfManager.appleAnchorName)
         return HelperResponse(exitCode: 1, stderr: "Failed to write PF rules: \(error.localizedDescription)")
     }
 
     let dryRunOut = runBinary("/sbin/pfctl", arguments: ["-nf", rulesPath])
     guard dryRunOut.succeeded else {
-        rollbackHotspotSetup()
+        rollbackHotspotSetup(pfManager.anchorName, pfManager.appleAnchorName)
         return HelperResponse(exitCode: dryRunOut.exitCode, stdout: dryRunOut.stdout, stderr: "PF syntax check failed: \(dryRunOut.stderr)")
     }
 
     let loadPrimary = runBinary("/sbin/pfctl", arguments: ["-a", pfManager.anchorName, "-f", rulesPath])
     guard loadPrimary.succeeded else {
-        rollbackHotspotSetup()
+        rollbackHotspotSetup(pfManager.anchorName, pfManager.appleAnchorName)
         return loadPrimary
     }
 
     let loadApple = runBinary("/sbin/pfctl", arguments: ["-a", pfManager.appleAnchorName, "-f", rulesPath])
     guard loadApple.succeeded else {
-        rollbackHotspotSetup()
+        rollbackHotspotSetup(pfManager.anchorName, pfManager.appleAnchorName)
         return loadApple
     }
 
     let pfEnable = runBinary("/sbin/pfctl", arguments: ["-e"])
     if !pfEnable.succeeded && !pfEnable.stderr.lowercased().contains("already enabled") {
-        rollbackHotspotSetup()
+        rollbackHotspotSetup(pfManager.anchorName, pfManager.appleAnchorName)
         return pfEnable
     }
 
     let sysctlOut = runBinary("/usr/sbin/sysctl", arguments: ["-w", "net.inet.ip.forwarding=1"])
     guard sysctlOut.succeeded else {
-        rollbackHotspotSetup()
+        rollbackHotspotSetup(pfManager.anchorName, pfManager.appleAnchorName)
         return sysctlOut
     }
 
     _ = runBinary("/usr/bin/killall", arguments: ["-HUP", "bootpd"])
     _ = runBinary("/usr/bin/killall", arguments: ["-HUP", "mDNSResponder"])
 
-    let broadcasting = DarwinSocketHelper.isInterfaceActive("bridge100") || DarwinSocketHelper.isInterfaceActive("ap1")
-    let statusNote = broadcasting
-        ? "Hotspot active and broadcasting (\(upstream) -> \(downstream), bridge100 up)"
-        : "Hotspot NAT/forwarding armed on \(upstream) (awaiting macOS Internet Sharing SoftAP)"
-    return HelperResponse(exitCode: 0, stdout: statusNote)
+    return HelperResponse(
+        exitCode: 0,
+        stdout: "Hotspot active and broadcasting (\(upstream) -> \(downstream), bridge100/ap1 up)"
+    )
 }
 
 private func handleHotspotStop(_ args: [String]) -> HelperResponse {

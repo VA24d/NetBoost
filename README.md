@@ -2,7 +2,7 @@
 
 <img src="Assets/AppIcon.png" alt="NetBoost icon" width="96" />
 
-NetBoost is a macOS network utility built with Swift 6 and SwiftUI. It shares 802.1X Ethernet over Wi-Fi and switches split-tunnel OpenVPN automatically. Built-in tools add per-interface proxies, chunked HTTP downloads, and local LAN repairs.
+NetBoost is a macOS network utility built with Swift 6 and SwiftUI. It shares clean Ethernet or USB uplinks over Wi-Fi. When you plug into campus LAN, it switches split-tunnel OpenVPN automatically. Built-in tools add per-interface proxies, chunked HTTP downloads, and local LAN repairs.
 
 [![CI](https://github.com/VA24d/NetBoost/actions/workflows/ci.yml/badge.svg)](https://github.com/VA24d/NetBoost/actions/workflows/ci.yml)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC_BY--NC--SA_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
@@ -17,7 +17,7 @@ The Dashboard shows active interfaces and live upload and download rates. Quick 
 
 ### Hotspot sharing
 
-Hotspot mode turns on kernel IP forwarding, loads the `netboost` PF anchor, writes WPA2 or WPA3 NAT settings, and lists client leases.
+Hotspot mode checks for active `eapolclient` sessions before turning on IP forwarding, loading the `netboost` PF anchor, and sharing clean uplinks.
 
 ![NetBoost Hotspot sharing](Assets/screenshots/hotspot.png)
 
@@ -39,7 +39,7 @@ Seven tabs inside one window and a menu bar popover cover each network workflow.
 
 ### Ethernet-to-Wi-Fi sharing
 
-Hotspot mode routes an 802.1X Ethernet uplink (`en10`) out over Wi-Fi (`en0`). NetBoost turns on `net.inet.ip.forwarding=1`, loads PF rules into the `netboost` anchor, and writes `com.apple.nat` settings with WPA2 or WPA3 security. Apple restricts third-party SoftAP radio startup on macOS. The UI pairs kernel setup with a button that opens Internet Sharing in System Settings. Client leases come from `/var/db/dhcpd_leases` and ARP scans.
+Hotspot mode shares an active Ethernet or USB uplink that has no 802.1X lock over Wi-Fi (`en0`). NetBoost turns on `net.inet.ip.forwarding=1`, loads PF rules into the `netboost` anchor, and writes `com.apple.nat` settings with WPA2 or WPA3 security. Apple's `configd` blocks Internet Sharing on active 802.1X interfaces. NetBoost checks for `eapolclient` first, avoids writing stale NAT settings, and picks clean non-802.1X uplinks when present. For 802.1X-locked adapters like `en10`, the UI points apps to the local Proxy Dispatcher on `127.0.0.1:1080`. Client leases come from `/var/db/dhcpd_leases` and ARP scans.
 
 ### Proxy dispatcher and route pinning
 
@@ -98,7 +98,7 @@ NetBoost/
 
 ## Build and install
 
-Requirements are macOS 14 (Sonoma) or macOS 15 (Sequoia), plus Xcode 16+ or Apple Command Line Tools (`Swift 6.0+`). Download `NetBoost-1.0.0.dmg` from [Releases](https://github.com/VA24d/NetBoost/releases) and drag `NetBoost.app` into `/Applications`, or build from source:
+Requirements are macOS 27 (Golden Gate), plus Xcode 16+ or Apple Command Line Tools (`Swift 6.0+`). Download `NetBoost-1.0.0.dmg` from [Releases](https://github.com/VA24d/NetBoost/releases) and drag `NetBoost.app` into `/Applications`, or build from source:
 
 ```bash
 git clone https://github.com/VA24d/NetBoost.git

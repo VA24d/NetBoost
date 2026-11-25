@@ -69,6 +69,39 @@ public final class AppState: ObservableObject {
     @Published public var downstreamInterface: String = "en0"
     @Published public var hotspotError: String? = nil
     @Published public internal(set) var isWiFiConnectedToExternalNetwork: Bool = false
+    @Published public internal(set) var dot1XProtectedInterfaces: Set<String> = []
+    internal var userSelectedUpstreamInterface: String? = nil
+
+    public var isUpstreamProtectedBy8021X: Bool {
+        dot1XProtectedInterfaces.contains(upstreamInterface)
+    }
+
+    public var shareableUpstreamInterfaces: [NetworkInterfaceInfo] {
+        let protected = dot1XProtectedInterfaces
+        return hardwareInterfaces
+            .filter { iface in
+                iface.isUp
+                    && iface.bsdName != "en0"
+                    && iface.bsdName != downstreamInterface
+                    && iface.bsdName.hasPrefix("en")
+                    && iface.ipv4Address != nil
+                    && HotspotNATController.isEligibleHotspotInterface(iface.bsdName)
+            }
+            .sorted { lhs, rhs in
+                let lhsProtected = protected.contains(lhs.bsdName)
+                let rhsProtected = protected.contains(rhs.bsdName)
+                if lhsProtected != rhsProtected { return !lhsProtected }
+                if (lhs.bsdName == "en10") != (rhs.bsdName == "en10") {
+                    return lhs.bsdName == "en10"
+                }
+                return lhs.bsdName.localizedStandardCompare(rhs.bsdName) == .orderedAscending
+            }
+    }
+
+    public func selectUpstreamInterface(_ bsdName: String) {
+        userSelectedUpstreamInterface = bsdName
+        upstreamInterface = bsdName
+    }
 
     // Appearance Preferences
     @Published public var menuBarIconStyle: MenuBarIconStyle = .iconAndSpeed
@@ -351,25 +384,41 @@ public final class AppState: ObservableObject {
 
     public func refreshHardwareInterfaces() async {
         let interfaces = await SystemInterfaceProvider().fetchInterfaces()
+        let targetDownstream = downstreamInterface
+        let (detected8021X, externalWiFi) = await Task.detached(priority: .utility) {
+            (
+                HotspotNATController.detectActive8021XInterfaces(),
+                Self.checkExternalWiFiConnected(downstream: targetDownstream)
+            )
+        }.value
+
         hardwareInterfaces = interfaces
+        dot1XProtectedInterfaces = detected8021X
+
         let activeUp = interfaces.filter { $0.isUp }
         let physicalUp = activeUp.filter { iface in
+            let lower = iface.bsdName.lowercased()
             guard iface.bsdName != "en0", iface.ipv4Address != nil else { return false }
             return HotspotNATController.isEligibleHotspotInterface(iface.bsdName)
-                && !iface.bsdName.lowercased().hasPrefix("ipsec")
-                && !iface.bsdName.lowercased().hasPrefix("ppp")
+                && !lower.hasPrefix("ipsec")
+                && !lower.hasPrefix("ppp")
         }
-        if let preferred = physicalUp.first(where: { $0.bsdName == "en10" }) ?? physicalUp.first(where: { $0.bsdName.hasPrefix("en") }) {
-            upstreamInterface = preferred.bsdName
+
+        let currentIsActiveEligible = physicalUp.contains(where: { $0.bsdName == upstreamInterface })
+        let currentIs8021XLocked = detected8021X.contains(upstreamInterface)
+        let isUserChoiceActive = userSelectedUpstreamInterface == upstreamInterface && currentIsActiveEligible
+        if let preferred = HotspotNATController.selectPreferredUpstreamInterface(
+            from: physicalUp,
+            dot1XProtected: detected8021X
+        ) {
+            if !currentIsActiveEligible || (!isUserChoiceActive && currentIs8021XLocked && !detected8021X.contains(preferred)) {
+                upstreamInterface = preferred
+            }
         }
         if activeUp.contains(where: { $0.bsdName == "en0" }) {
             downstreamInterface = "en0"
         }
 
-        let targetDownstream = downstreamInterface
-        let externalWiFi = await Task.detached(priority: .utility) {
-            Self.checkExternalWiFiConnected(downstream: targetDownstream)
-        }.value
         isWiFiConnectedToExternalNetwork = externalWiFi
     }
 }

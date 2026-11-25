@@ -55,8 +55,8 @@ public struct MenuBarPopupView: View {
                 quickRowButton(
                     icon: "personalhotspot",
                     title: "Hotspot Sharing",
-                    status: appState.isHotspotActive ? "\(appState.connectedClients.count) active" : "Off",
-                    color: appState.isHotspotActive ? GlassTheme.emeraldGreen : GlassTheme.textTertiary
+                    status: menuBarHotspotStatus,
+                    color: menuBarHotspotColor
                 ) {
                     Task {
                         do {
@@ -67,6 +67,7 @@ public struct MenuBarPopupView: View {
                         }
                     }
                 }
+                .disabled(!appState.canEnableHotspot && !appState.isHotspotActive)
 
                 quickRowButton(
                     icon: "arrow.triangle.branch",
@@ -183,6 +184,23 @@ public struct MenuBarPopupView: View {
         .frame(width: 300)
         .preferredColorScheme(.dark)
         .background(VisualEffectBackground(material: .popover, blendingMode: .behindWindow))
+    }
+
+    private var menuBarHotspotStatus: String {
+        if appState.isUpstreamProtectedBy8021X && !appState.isHotspotActive {
+            return "Blocked (802.1X)"
+        }
+        if !appState.canEnableHotspot && !appState.isHotspotActive {
+            return "Unavailable"
+        }
+        return appState.isHotspotActive ? "\(appState.connectedClients.count) active" : "Off"
+    }
+
+    private var menuBarHotspotColor: Color {
+        if appState.isUpstreamProtectedBy8021X {
+            return GlassTheme.amberWarning
+        }
+        return appState.isHotspotActive ? GlassTheme.emeraldGreen : GlassTheme.textTertiary
     }
 
     private func quickRowButton(

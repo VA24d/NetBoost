@@ -1,12 +1,12 @@
 # NetBoost product specification
 
-NetBoost runs on macOS 14 (Sonoma) and macOS 15 (Sequoia). It targets networks where 802.1X Ethernet, tethering, split OpenVPN, and rate limits collide.
+NetBoost targets macOS 27 (Golden Gate), requiring Xcode 16+ or Swift 6.0+ Command Line Tools. It handles networks where 802.1X Ethernet, tethering, split OpenVPN, and rate limits collide.
 
 ## Functional requirements
 
 ### 1. Ethernet-to-Wi-Fi sharing
 
-Many 802.1X networks use PEAP or MSCHAPv2, which locks out tablets and headless hardware. NetBoost routes traffic from Ethernet (`en10`) out through Wi-Fi (`en0`). It sets `net.inet.ip.forwarding=1`, loads rules inside the `netboost` PF anchor, and writes WPA2 or WPA3 settings to `com.apple.nat`. If macOS needs manual SoftAP startup, a button opens Internet Sharing settings. Active clients appear from `bootpd` leases and ARP scans.
+Many 802.1X networks use PEAP or MSCHAPv2, and Apple's `configd` blocks Internet Sharing on any adapter running `eapolclient`. NetBoost checks for active 802.1X sessions first. It avoids writing stale NAT rules for locked adapters and selects clean non-802.1X Ethernet or USB uplinks when present. For eligible uplinks, it sets `net.inet.ip.forwarding=1`, loads the `netboost` PF anchor, and writes WPA2 or WPA3 settings to `com.apple.nat`. When campus Ethernet (`en10`) runs 802.1X, the UI points traffic to Proxy Dispatcher (`127.0.0.1:1080`). Active clients appear from `bootpd` leases and ARP scans.
 
 ### 2. Campus VPN automation
 

@@ -42,6 +42,7 @@ public final class HotspotNATController: HotspotControllerProtocol, @unchecked S
     private let anchorName: String
     private let sysctlController: SysctlForwardingController.Type
     private let dhcpServer: DHCPServer
+    private let active8021XProvider: @Sendable () -> Set<String>
 
     /// Computed PF NAT anchor manager always reflecting the latest configuration while preserving the configured anchor name.
     public var pfManager: PFNATAnchorManager {
@@ -51,12 +52,14 @@ public final class HotspotNATController: HotspotControllerProtocol, @unchecked S
     public init(
         configuration: HotspotConfiguration = .default,
         pfManager: PFNATAnchorManager? = nil,
-        dhcpServer: DHCPServer? = nil
+        dhcpServer: DHCPServer? = nil,
+        active8021XProvider: (@Sendable () -> Set<String>)? = nil
     ) {
         self._configuration = configuration
         self.anchorName = pfManager?.anchorName ?? "netboost"
         self.sysctlController = SysctlForwardingController.self
         self.dhcpServer = dhcpServer ?? DHCPServer(config: configuration)
+        self.active8021XProvider = active8021XProvider ?? { Self.detectActive8021XInterfaces() }
     }
 
     /// Returns a PFNATAnchorManager synchronized with the controller's current upstream interface and subnet.
@@ -93,6 +96,112 @@ public final class HotspotNATController: HotspotControllerProtocol, @unchecked S
         let lower = name.lowercased()
         let disallowedPrefixes = ["lo", "bridge", "utun", "awdl", "llw", "gif", "stf", "anpi", "ap"]
         return !disallowedPrefixes.contains(where: { lower.hasPrefix($0) })
+    }
+
+    /// Parses `/bin/ps -axo pid=,args=` output for active `eapolclient` processes and their bound interfaces.
+    public static func parseEAPOLClientProcesses(psOutput: String) -> [(pid: Int32, interface: String?)] {
+        var results: [(pid: Int32, interface: String?)] = []
+        for rawLine in psOutput.components(separatedBy: .newlines) {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty,
+                  let firstSpace = trimmed.firstIndex(where: { $0 == " " || $0 == "\t" }),
+                  let pid = Int32(trimmed[..<firstSpace]),
+                  pid > 1 else {
+                continue
+            }
+
+            let cmdPart = String(trimmed[firstSpace...]).trimmingCharacters(in: .whitespaces)
+            let tokens = cmdPart.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+            guard let executable = tokens.first,
+                  executable == "eapolclient" || executable.hasSuffix("/eapolclient") else {
+                continue
+            }
+
+            let argTokens = Array(tokens.dropFirst())
+            var matchedInterface: String?
+            var idx = 0
+            while idx < argTokens.count {
+                let token = argTokens[idx]
+                if token == "-i", idx + 1 < argTokens.count {
+                    let candidate = argTokens[idx + 1]
+                    if isValidBSDInterfaceName(candidate) {
+                        matchedInterface = candidate
+                        break
+                    }
+                    idx += 2
+                    continue
+                }
+                if token.hasPrefix("-i"), token.count > 2 {
+                    let candidate = String(token.dropFirst(2))
+                    if isValidBSDInterfaceName(candidate) {
+                        matchedInterface = candidate
+                        break
+                    }
+                }
+                if token.range(of: "^[a-zA-Z]+[0-9]+$", options: .regularExpression) != nil,
+                   isValidBSDInterfaceName(token) {
+                    matchedInterface = token
+                }
+                idx += 1
+            }
+            results.append((pid: pid, interface: matchedInterface))
+        }
+        return results
+    }
+
+    /// Extracts BSD interface names protected by IEEE 802.1X (`eapolclient`) from `ps -axo pid=,args=` output.
+    public static func parseActive8021XInterfaces(psOutput: String) -> Set<String> {
+        Set(parseEAPOLClientProcesses(psOutput: psOutput).compactMap(\.interface))
+    }
+
+    /// Queries the live process table for interfaces currently running IEEE 802.1X (`eapolclient`).
+    public static func detectActive8021XInterfaces() -> Set<String> {
+        let process = Process()
+        let stdoutPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-axo", "pid=,args="]
+        process.standardOutput = stdoutPipe
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+        } catch {
+            return []
+        }
+
+        let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              let output = String(data: data, encoding: .utf8) else {
+            return []
+        }
+        return parseActive8021XInterfaces(psOutput: output)
+    }
+
+    /// Selects the best active wired/USB upstream interface, preferring non-802.1X adapters over 802.1X-locked ones.
+    public static func selectPreferredUpstreamInterface(
+        from interfaces: [NetworkInterfaceInfo],
+        dot1XProtected: Set<String>
+    ) -> String? {
+        let eligible = interfaces.filter { iface in
+            guard iface.isUp, iface.bsdName != "en0", iface.ipv4Address != nil else { return false }
+            let lower = iface.bsdName.lowercased()
+            return isEligibleHotspotInterface(iface.bsdName)
+                && !lower.hasPrefix("ipsec")
+                && !lower.hasPrefix("ppp")
+        }
+        guard !eligible.isEmpty else { return nil }
+
+        let clean = eligible.filter { !dot1XProtected.contains($0.bsdName) }
+        if let preferredClean = clean.first(where: { $0.bsdName == "en10" })
+            ?? clean.first(where: { $0.bsdName.hasPrefix("en") })
+            ?? clean.first {
+            return preferredClean.bsdName
+        }
+
+        return (eligible.first(where: { $0.bsdName == "en10" })
+            ?? eligible.first(where: { $0.bsdName.hasPrefix("en") })
+            ?? eligible.first)?.bsdName
     }
 
     /// Validates a dotted-quad IPv4 address string.
@@ -414,6 +523,12 @@ public final class HotspotNATController: HotspotControllerProtocol, @unchecked S
             throw PrivilegeError.executionFailed("Invalid PF anchor name: '\(effectivePF.anchorName)'")
         }
 
+        if active8021XProvider().contains(upstreamInterface) {
+            throw PrivilegeError.executionFailed(
+                "macOS blocks Internet Sharing on \(upstreamInterface) because IEEE 802.1X authentication (eapolclient) is active. Switch to a non-802.1X uplink or use Proxy Dispatcher (127.0.0.1:1080)."
+            )
+        }
+
         updateConfig(upstream: upstreamInterface, downstream: downstreamInterface)
 
         if !PrivilegeHelper.isRoot && (PrivilegeHelper.locateBundledOrBuiltHelperExecutable() != nil || PrivilegeHelper.isHelperDaemonInstalled) {
@@ -499,6 +614,27 @@ public final class HotspotNATController: HotspotControllerProtocol, @unchecked S
             }
         } else {
             _ = try await PrivilegeHelper.runElevated(script: combinedStart)
+        }
+
+        var broadcasting = false
+        for _ in 0..<17 {
+            if DarwinSocketHelper.isInterfaceActive("bridge100") || DarwinSocketHelper.isInterfaceActive("ap1") {
+                broadcasting = true
+                break
+            }
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+        guard broadcasting else {
+            if let stopScript = try? buildStopCommand() {
+                if PrivilegeHelper.isRoot {
+                    _ = try? await ShellCommand.runBash(stopScript)
+                } else {
+                    _ = try? await PrivilegeHelper.runElevated(script: stopScript)
+                }
+            }
+            throw PrivilegeError.executionFailed(
+                "macOS Internet Sharing failed to start a SoftAP (bridge100/ap1 did not become active). Verify \(upstreamInterface) is eligible for Internet Sharing or use Proxy Dispatcher (127.0.0.1:1080)."
+            )
         }
     }
 
