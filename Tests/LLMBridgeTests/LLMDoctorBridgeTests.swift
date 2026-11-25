@@ -176,21 +176,59 @@ struct LLMDoctorBridgeTests {
             var emptyModelsList = true
 
             func start() async throws -> UInt16 {
-                try await withCheckedThrowingContinuation { cont in
+                final class OnceGate: @unchecked Sendable {
+                    private let lock = NSLock()
+                    private var resumed = false
+                    func tryEnter() -> Bool {
+                        lock.withLock {
+                            guard !resumed else { return false }
+                            resumed = true
+                            return true
+                        }
+                    }
+                }
+
+                return try await withCheckedThrowingContinuation { cont in
+                    let gate = OnceGate()
                     do {
-                        let l = try NWListener(using: .tcp, on: .any)
-                        self.listener = l
+                        let params = NWParameters.tcp
+                        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: .any)
+                        let l = try NWListener(using: params)
+                        self.lock.withLock { self.listener = l }
                         l.stateUpdateHandler = { state in
-                            if case .ready = state, let port = l.port?.rawValue {
-                                cont.resume(returning: port)
+                            switch state {
+                            case .ready:
+                                if let port = l.port?.rawValue {
+                                    if gate.tryEnter() { cont.resume(returning: port) }
+                                } else {
+                                    l.cancel()
+                                    if gate.tryEnter() {
+                                        cont.resume(throwing: NSError(domain: "CustomMockServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to determine bound port"]))
+                                    }
+                                }
+                            case .waiting(let err), .failed(let err):
+                                l.cancel()
+                                if gate.tryEnter() { cont.resume(throwing: err) }
+                            case .cancelled:
+                                if gate.tryEnter() {
+                                    cont.resume(throwing: NSError(domain: "CustomMockServer", code: -2, userInfo: [NSLocalizedDescriptionKey: "Listener cancelled before ready"]))
+                                }
+                            default:
+                                break
                             }
                         }
                         l.newConnectionHandler = { [weak self] conn in
                             self?.handle(conn)
                         }
                         l.start(queue: .global())
+                        DispatchQueue.global().asyncAfter(deadline: .now() + 5.0) {
+                            if gate.tryEnter() {
+                                l.cancel()
+                                cont.resume(throwing: NSError(domain: "CustomMockServer", code: -3, userInfo: [NSLocalizedDescriptionKey: "Startup timed out"]))
+                            }
+                        }
                     } catch {
-                        cont.resume(throwing: error)
+                        if gate.tryEnter() { cont.resume(throwing: error) }
                     }
                 }
             }

@@ -6,6 +6,14 @@ import Darwin
 @Suite("HTTP Proxy Unit & Integration Tests")
 struct HTTPProxyTests {
 
+    private func configureClientSocket(_ fd: Int32, timeoutSeconds: Int = 5) {
+        var one: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        var tv = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    }
+
     @Test("HTTP Proxy request line parser: CONNECT method")
     func testParseConnectRequest() {
         let raw = "CONNECT turing.iiit.ac.in:443 HTTP/1.1\r\nHost: turing.iiit.ac.in:443\r\n\r\n"
@@ -85,8 +93,7 @@ struct HTTPProxyTests {
             return
         }
         defer { Darwin.close(clientFd) }
-        var one: Int32 = 1
-        setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        configureClientSocket(clientFd)
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -141,8 +148,7 @@ struct HTTPProxyTests {
 
         let clientFd = socket(AF_INET, SOCK_STREAM, 0)
         defer { Darwin.close(clientFd) }
-        var one: Int32 = 1
-        setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        configureClientSocket(clientFd)
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -179,8 +185,7 @@ struct HTTPProxyTests {
 
         let clientFd = socket(AF_INET, SOCK_STREAM, 0)
         defer { Darwin.close(clientFd) }
-        var one: Int32 = 1
-        setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        configureClientSocket(clientFd)
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -227,8 +232,7 @@ struct HTTPProxyTests {
 
         let clientFd = socket(AF_INET, SOCK_STREAM, 0)
         defer { Darwin.close(clientFd) }
-        var one: Int32 = 1
-        setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        configureClientSocket(clientFd)
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -312,6 +316,7 @@ struct HTTPProxyTests {
                 }
             }
             if conn >= 0 {
+                configureClientSocket(conn)
                 var buf = [UInt8](repeating: 0, count: 64)
                 let n = Darwin.read(conn, &buf, buf.count)
                 if n > 0 {
@@ -329,7 +334,7 @@ struct HTTPProxyTests {
 
         let clientFd = socket(AF_INET, SOCK_STREAM, 0)
         defer { Darwin.close(clientFd) }
-        setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        configureClientSocket(clientFd)
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)

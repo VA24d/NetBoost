@@ -216,6 +216,7 @@ public final class SOCKS5Server: @unchecked Sendable {
         onBytesTransferred: (@Sendable (Int64, Int64) -> Void)?
     ) async {
         defer { Darwin.close(clientFd) }
+        ProxySocketIO.setHandshakeTimeouts(fd: clientFd, seconds: 15)
 
         enum HandshakeOutcome {
             case connected(targetFd: Int32, targetHost: String, targetPort: Int)

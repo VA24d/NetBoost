@@ -279,6 +279,7 @@ public final class HTTPProxyServer: @unchecked Sendable {
         onBytesTransferred: (@Sendable (Int64, Int64) -> Void)?
     ) async {
         defer { Darwin.close(clientFd) }
+        ProxySocketIO.setHandshakeTimeouts(fd: clientFd, seconds: 15)
 
         enum HeaderReadOutcome {
             case parsed(RequestType, headerString: String, extraBodyData: Data)

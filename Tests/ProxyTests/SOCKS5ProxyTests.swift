@@ -6,6 +6,14 @@ import Darwin
 @Suite("SOCKS5 Proxy Unit & Integration Tests")
 struct SOCKS5ProxyTests {
 
+    private func configureClientSocket(_ fd: Int32, timeoutSeconds: Int = 5) {
+        var one: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        var tv = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    }
+
     @Test("SOCKS5 protocol version validation")
     func testVersionValidation() {
         #expect(SOCKS5Server.validateVersion(0x05) == true)
@@ -66,8 +74,7 @@ struct SOCKS5ProxyTests {
         }
         defer { Darwin.close(clientFd) }
 
-        var one: Int32 = 1
-        setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        configureClientSocket(clientFd)
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -138,8 +145,7 @@ struct SOCKS5ProxyTests {
 
         let clientFd = socket(AF_INET, SOCK_STREAM, 0)
         defer { Darwin.close(clientFd) }
-        var one: Int32 = 1
-        setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        configureClientSocket(clientFd)
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -186,8 +192,7 @@ struct SOCKS5ProxyTests {
 
         let clientFd = socket(AF_INET, SOCK_STREAM, 0)
         defer { Darwin.close(clientFd) }
-        var one: Int32 = 1
-        setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        configureClientSocket(clientFd)
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -227,8 +232,7 @@ struct SOCKS5ProxyTests {
 
         let clientFd = socket(AF_INET, SOCK_STREAM, 0)
         defer { Darwin.close(clientFd) }
-        var one: Int32 = 1
-        setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        configureClientSocket(clientFd)
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -271,8 +275,7 @@ struct SOCKS5ProxyTests {
 
         let clientFd = socket(AF_INET, SOCK_STREAM, 0)
         defer { Darwin.close(clientFd) }
-        var one: Int32 = 1
-        setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        configureClientSocket(clientFd)
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)

@@ -53,7 +53,7 @@ struct Tier2_30_ServiceOrderBoundariesTests {
 
     @Test("T2-F30-02: Reorder network services places Ethernet first")
     func testReorderPrioritizesEthernet() {
-        var currentServices = ["Wi-Fi", "USB 10/100 LAN", "Thunderbolt Bridge"]
+        let currentServices = ["Wi-Fi", "USB 10/100 LAN", "Thunderbolt Bridge"]
 
         func prioritizeEthernet(services: [String]) -> [String] {
             var reordered = services

@@ -40,6 +40,21 @@ public enum ShellError: Error, LocalizedError, Sendable, Equatable {
 
 public final class ShellCommand: Sendable {
 
+    private static let ioQueue = DispatchQueue(
+        label: "com.netboost.shellcommand.io",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
+
+    private static func readPipeToEnd(_ handle: FileHandle) async -> Data {
+        await withCheckedContinuation { continuation in
+            ioQueue.async {
+                let data = handle.readDataToEndOfFile()
+                continuation.resume(returning: data)
+            }
+        }
+    }
+
     /// Runs an executable with arguments and enforces a timeout.
     public static func run(
         _ executable: String,
@@ -114,13 +129,8 @@ public final class ShellCommand: Sendable {
         // Wait for process exit without blocking a cooperative thread, draining pipes concurrently.
         return try await withThrowingTaskGroup(of: ShellOutput.self) { group in
             group.addTask {
-                async let stdoutDataAsync = Task.detached {
-                    stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                }.value
-
-                async let stderrDataAsync = Task.detached {
-                    stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                }.value
+                async let stdoutDataAsync = readPipeToEnd(stdoutPipe.fileHandleForReading)
+                async let stderrDataAsync = readPipeToEnd(stderrPipe.fileHandleForReading)
 
                 await withTaskCancellationHandler {
                     await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in

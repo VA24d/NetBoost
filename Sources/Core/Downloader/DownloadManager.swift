@@ -33,7 +33,7 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
     private var tasks: [UUID: DownloadTaskInfo] = [:]
     private var downloadTasks: [UUID: Task<Void, Never>] = [:]
     private var assemblers: [UUID: DiskAssembler] = [:]
-    private var completions: [UUID: [CheckedContinuation<DownloadTaskInfo, any Error>]] = [:]
+    private var completions: [UUID: [(token: UUID, continuation: CheckedContinuation<DownloadTaskInfo, any Error>)]] = [:]
     private var continuation: AsyncStream<DownloadTaskInfo>.Continuation?
 
     public let taskPublisher: AsyncStream<DownloadTaskInfo>
@@ -185,28 +185,50 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
             if task.status == .cancelled { throw CancellationError() }
         }
 
+        let waitToken = UUID()
         return try await withThrowingTaskGroup(of: DownloadTaskInfo.self) { group in
             group.addTask {
-                try await withCheckedThrowingContinuation { continuation in
-                    self.lock.withLock {
-                        if let task = self.tasks[id] {
-                            if task.status == .completed {
-                                continuation.resume(returning: task)
-                                return
-                            } else if task.status == .failed {
-                                continuation.resume(throwing: NSError(
-                                    domain: "DownloadManager",
-                                    code: -6,
-                                    userInfo: [NSLocalizedDescriptionKey: "Download failed"]
-                                ))
-                                return
-                            } else if task.status == .cancelled {
+                try await withTaskCancellationHandler {
+                    try await withCheckedThrowingContinuation { continuation in
+                        self.lock.withLock {
+                            if Task.isCancelled {
                                 continuation.resume(throwing: CancellationError())
                                 return
                             }
+                            if let task = self.tasks[id] {
+                                if task.status == .completed {
+                                    continuation.resume(returning: task)
+                                    return
+                                } else if task.status == .failed {
+                                    continuation.resume(throwing: NSError(
+                                        domain: "DownloadManager",
+                                        code: -6,
+                                        userInfo: [NSLocalizedDescriptionKey: "Download failed"]
+                                    ))
+                                    return
+                                } else if task.status == .cancelled {
+                                    continuation.resume(throwing: CancellationError())
+                                    return
+                                }
+                            }
+                            self.completions[id, default: []].append((waitToken, continuation))
                         }
-                        self.completions[id, default: []].append(continuation)
                     }
+                } onCancel: {
+                    let cancelled = self.lock.withLock { () -> CheckedContinuation<DownloadTaskInfo, any Error>? in
+                        guard var list = self.completions[id],
+                              let idx = list.firstIndex(where: { $0.token == waitToken }) else {
+                            return nil
+                        }
+                        let removed = list.remove(at: idx)
+                        if list.isEmpty {
+                            self.completions.removeValue(forKey: id)
+                        } else {
+                            self.completions[id] = list
+                        }
+                        return removed.continuation
+                    }
+                    cancelled?.resume(throwing: CancellationError())
                 }
             }
 
@@ -219,9 +241,14 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
                 )
             }
 
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
+            do {
+                let result = try await group.next()!
+                group.cancelAll()
+                return result
+            } catch {
+                group.cancelAll()
+                throw error
+            }
         }
     }
 
@@ -551,12 +578,12 @@ public final class DownloadManager: DownloadManagerProtocol, @unchecked Sendable
             completions.removeValue(forKey: taskId) ?? []
         }
 
-        for c in waiting {
+        for entry in waiting {
             switch result {
             case .success(let task):
-                c.resume(returning: task)
+                entry.continuation.resume(returning: task)
             case .failure(let error):
-                c.resume(throwing: error)
+                entry.continuation.resume(throwing: error)
             }
         }
     }

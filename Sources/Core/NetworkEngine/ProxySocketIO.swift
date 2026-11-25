@@ -60,6 +60,15 @@ internal enum ProxySocketIO {
         }
     }
 
+    static func setHandshakeTimeouts(fd: Int32, seconds: Int = 15) {
+        guard fd >= 0 else { return }
+        var one: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        var tv = timeval(tv_sec: seconds, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    }
+
     static func clearTimeouts(fd: Int32) {
         guard fd >= 0 else { return }
         var zero = timeval(tv_sec: 0, tv_usec: 0)

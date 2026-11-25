@@ -54,25 +54,62 @@ struct Scenario06_PerJobMultiInterfaceCLITests {
         #expect(lastCmd?.environment?["ALL_PROXY"] == "socks5://127.0.0.1:1080")
 
         // Step 5: Execute Direct TCP Echo through Target Server to Verify Data Transfer
+        final class OnceGate: @unchecked Sendable {
+            private let lock = NSLock()
+            private var resumed = false
+            func tryEnter() -> Bool {
+                lock.withLock {
+                    guard !resumed else { return false }
+                    resumed = true
+                    return true
+                }
+            }
+        }
+
         let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: targetPort)!)
         let conn = NWConnection(to: endpoint, using: .tcp)
+        defer { conn.cancel() }
 
         let payload = Data("Job Dispatch Ping Payload".utf8)
+        let gate = OnceGate()
         let received: Data = try await withCheckedThrowingContinuation { continuation in
             conn.stateUpdateHandler = { state in
-                if case .ready = state {
+                switch state {
+                case .ready:
                     conn.send(content: payload, completion: .contentProcessed { err in
-                        if let err = err { continuation.resume(throwing: err); return }
+                        if let err = err {
+                            conn.cancel()
+                            if gate.tryEnter() { continuation.resume(throwing: err) }
+                            return
+                        }
                         conn.receive(minimumIncompleteLength: 1, maximumLength: 1024) { data, _, _, err in
-                            if let err = err { continuation.resume(throwing: err) }
-                            else { continuation.resume(returning: data ?? Data()) }
+                            if let err = err {
+                                if gate.tryEnter() { continuation.resume(throwing: err) }
+                            } else if let data = data {
+                                if gate.tryEnter() { continuation.resume(returning: data) }
+                            } else {
+                                if gate.tryEnter() { continuation.resume(returning: Data()) }
+                            }
                         }
                     })
+                case .waiting(let err), .failed(let err):
+                    conn.cancel()
+                    if gate.tryEnter() { continuation.resume(throwing: err) }
+                case .cancelled:
+                    if gate.tryEnter() { continuation.resume(throwing: CancellationError()) }
+                default:
+                    break
                 }
             }
             conn.start(queue: .global())
+
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5.0) {
+                if gate.tryEnter() {
+                    conn.cancel()
+                    continuation.resume(throwing: POSIXError(.ETIMEDOUT))
+                }
+            }
         }
-        defer { conn.cancel() }
 
         #expect(received == payload)
         #expect(targetServer.totalBytesReceived >= payload.count)

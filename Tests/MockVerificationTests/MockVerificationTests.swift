@@ -273,35 +273,64 @@ struct MockSOCKS5TargetServerVerificationTests {
         let port = try await server.start()
         defer { server.stop() }
 
+        final class OnceGate: @unchecked Sendable {
+            private let lock = NSLock()
+            private var resumed = false
+            func tryEnter() -> Bool {
+                lock.withLock {
+                    guard !resumed else { return false }
+                    resumed = true
+                    return true
+                }
+            }
+        }
+
         let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
         let connection = NWConnection(to: endpoint, using: .tcp)
+        defer { connection.cancel() }
 
         let sentMessage = "NetBoost SOCKS5 Forwarding Verification String"
         let sentData = Data(sentMessage.utf8)
+        let gate = OnceGate()
 
         let receivedData: Data = try await withCheckedThrowingContinuation { continuation in
             connection.stateUpdateHandler = { state in
-                if case .ready = state {
+                switch state {
+                case .ready:
                     connection.send(content: sentData, completion: .contentProcessed { error in
                         if let error = error {
-                            continuation.resume(throwing: error)
+                            connection.cancel()
+                            if gate.tryEnter() { continuation.resume(throwing: error) }
                             return
                         }
                         connection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { data, _, _, error in
                             if let error = error {
-                                continuation.resume(throwing: error)
+                                if gate.tryEnter() { continuation.resume(throwing: error) }
+                            } else if let data = data {
+                                if gate.tryEnter() { continuation.resume(returning: data) }
                             } else {
-                                continuation.resume(returning: data ?? Data())
+                                if gate.tryEnter() { continuation.resume(returning: Data()) }
                             }
                         }
                     })
-                } else if case .failed(let error) = state {
-                    continuation.resume(throwing: error)
+                case .waiting(let error), .failed(let error):
+                    connection.cancel()
+                    if gate.tryEnter() { continuation.resume(throwing: error) }
+                case .cancelled:
+                    if gate.tryEnter() { continuation.resume(throwing: CancellationError()) }
+                default:
+                    break
                 }
             }
             connection.start(queue: .global())
+
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5.0) {
+                if gate.tryEnter() {
+                    connection.cancel()
+                    continuation.resume(throwing: POSIXError(.ETIMEDOUT))
+                }
+            }
         }
-        defer { connection.cancel() }
 
         #expect(receivedData == sentData)
         #expect(server.totalBytesReceived >= sentData.count)

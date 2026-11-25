@@ -45,9 +45,13 @@ struct Tier2_05_BuildToolingBoundariesTests {
         #expect(content.contains("test:"))
     }
 
-    @Test("T2-F05-05: CLT Frameworks path is valid on host system")
+    @Test("T2-F05-05: Swift Testing developer frameworks path is valid on host system")
     func testCLTFrameworksPath() {
+        let fm = FileManager.default
         let cltFrameworks = "/Library/Developer/CommandLineTools/Library/Developer/Frameworks"
-        #expect(FileManager.default.fileExists(atPath: cltFrameworks))
+        let xcodeFrameworks = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks"
+        let hasXcodeFrameworks = ((try? fm.contentsOfDirectory(atPath: "/Applications")) ?? [])
+            .contains { $0.hasPrefix("Xcode") && fm.fileExists(atPath: "/Applications/\($0)/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks") }
+        #expect(fm.fileExists(atPath: cltFrameworks) || fm.fileExists(atPath: xcodeFrameworks) || hasXcodeFrameworks)
     }
 }

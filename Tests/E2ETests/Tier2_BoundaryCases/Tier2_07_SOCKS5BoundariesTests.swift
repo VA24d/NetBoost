@@ -42,6 +42,18 @@ struct Tier2_07_SOCKS5BoundariesTests {
 
     @Test("T2-F07-03: Port collision detection when binding to an already occupied port")
     func testPortCollisionDetection() async throws {
+        final class OnceGate: @unchecked Sendable {
+            private let lock = NSLock()
+            private var resumed = false
+            func tryEnter() -> Bool {
+                lock.withLock {
+                    guard !resumed else { return false }
+                    resumed = true
+                    return true
+                }
+            }
+        }
+
         // Start target server on an ephemeral port
         let target = MockSOCKS5TargetServer()
         let occupiedPort = try await target.start()
@@ -49,26 +61,50 @@ struct Tier2_07_SOCKS5BoundariesTests {
 
         #expect(occupiedPort > 0)
 
-        // Attempting to bind another listener on the exact same port must fail or throw
+        // Attempting to bind another listener on the exact same loopback port must fail or throw
         let params = NWParameters.tcp
-        let duplicateListener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: occupiedPort)!)
+        params.allowLocalEndpointReuse = false
+        params.requiredLocalEndpoint = NWEndpoint.hostPort(
+            host: .ipv4(.loopback),
+            port: NWEndpoint.Port(rawValue: occupiedPort)!
+        )
+        var duplicateListener: NWListener?
+        defer { duplicateListener?.cancel() }
 
         await #expect(throws: Error.self) {
+            let listener = try NWListener(using: params)
+            duplicateListener = listener
+            let gate = OnceGate()
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                duplicateListener.stateUpdateHandler = { state in
+                listener.stateUpdateHandler = { state in
                     switch state {
-                    case .failed(let err):
-                        continuation.resume(throwing: err)
+                    case .waiting(let err), .failed(let err):
+                        listener.cancel()
+                        if gate.tryEnter() {
+                            continuation.resume(throwing: err)
+                        }
+                    case .cancelled:
+                        if gate.tryEnter() {
+                            continuation.resume(throwing: POSIXError(.EADDRINUSE))
+                        }
                     case .ready:
-                        continuation.resume()
+                        if gate.tryEnter() {
+                            continuation.resume()
+                        }
                     default:
                         break
                     }
                 }
-                duplicateListener.start(queue: .global())
+                listener.start(queue: .global())
+
+                DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
+                    if gate.tryEnter() {
+                        listener.cancel()
+                        continuation.resume(throwing: POSIXError(.ETIMEDOUT))
+                    }
+                }
             }
         }
-        duplicateListener.cancel()
     }
 
     @Test("T2-F07-04: SOCKS5 address type handling for IPv4, Domain Name, and IPv6")

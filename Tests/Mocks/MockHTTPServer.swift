@@ -72,7 +72,19 @@ public final class MockHTTPServer: @unchecked Sendable {
 
     /// Starts the HTTP server on an ephemeral loopback port and returns the assigned port.
     public func start() async throws -> UInt16 {
-        try await withCheckedThrowingContinuation { continuation in
+        final class OnceGate: @unchecked Sendable {
+            private let lock = NSLock()
+            private var resumed = false
+            func tryEnter() -> Bool {
+                lock.withLock {
+                    guard !resumed else { return false }
+                    resumed = true
+                    return true
+                }
+            }
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
             let alreadyRunningPort: UInt16? = lock.withLock {
                 if isRunning { return self.port }
                 return nil
@@ -82,10 +94,12 @@ public final class MockHTTPServer: @unchecked Sendable {
                 return
             }
 
+            let gate = OnceGate()
             do {
                 let params = NWParameters.tcp
-                let listener = try NWListener(using: params, on: .any)
-                self.listener = listener
+                params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: .any)
+                let listener = try NWListener(using: params)
+                self.lock.withLock { self.listener = listener }
 
                 listener.stateUpdateHandler = { [weak self] state in
                     guard let self = self else { return }
@@ -96,12 +110,24 @@ public final class MockHTTPServer: @unchecked Sendable {
                                 self.port = assignedPort
                                 self.isRunning = true
                             }
-                            continuation.resume(returning: assignedPort)
+                            if gate.tryEnter() {
+                                continuation.resume(returning: assignedPort)
+                            }
                         } else {
-                            continuation.resume(throwing: NSError(domain: "MockHTTPServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to determine bound port"]))
+                            listener.cancel()
+                            if gate.tryEnter() {
+                                continuation.resume(throwing: NSError(domain: "MockHTTPServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to determine bound port"]))
+                            }
                         }
-                    case .failed(let error):
-                        continuation.resume(throwing: error)
+                    case .waiting(let error), .failed(let error):
+                        listener.cancel()
+                        if gate.tryEnter() {
+                            continuation.resume(throwing: error)
+                        }
+                    case .cancelled:
+                        if gate.tryEnter() {
+                            continuation.resume(throwing: NSError(domain: "MockHTTPServer", code: -2, userInfo: [NSLocalizedDescriptionKey: "MockHTTPServer listener cancelled before ready"]))
+                        }
                     default:
                         break
                     }
@@ -112,8 +138,17 @@ public final class MockHTTPServer: @unchecked Sendable {
                 }
 
                 listener.start(queue: .global())
+
+                DispatchQueue.global().asyncAfter(deadline: .now() + 5.0) {
+                    if gate.tryEnter() {
+                        listener.cancel()
+                        continuation.resume(throwing: NSError(domain: "MockHTTPServer", code: -3, userInfo: [NSLocalizedDescriptionKey: "MockHTTPServer startup timed out"]))
+                    }
+                }
             } catch {
-                continuation.resume(throwing: error)
+                if gate.tryEnter() {
+                    continuation.resume(throwing: error)
+                }
             }
         }
     }

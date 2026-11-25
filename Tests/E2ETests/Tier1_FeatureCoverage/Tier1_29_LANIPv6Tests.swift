@@ -27,10 +27,12 @@ struct Tier1_29_LANIPv6Tests {
 
     @Test("T1-F29-01: Detect unrouted IPv6 configuration on LAN causing Happy Eyeballs delay")
     func testDetectUnroutedIPv6OnLAN() {
-        let hasUnroutedIPv6 = true
-        let happyEyeballsDelayMs = hasUnroutedIPv6 ? 500.0 : 0.0
+        func happyEyeballsPenaltyMs(hasUnroutedIPv6: Bool) -> Double {
+            hasUnroutedIPv6 ? 500.0 : 0.0
+        }
 
-        #expect(happyEyeballsDelayMs >= 500.0)
+        #expect(happyEyeballsPenaltyMs(hasUnroutedIPv6: true) >= 500.0)
+        #expect(happyEyeballsPenaltyMs(hasUnroutedIPv6: false) == 0.0)
     }
 
     @Test("T1-F29-02: Generate networksetup -setv6off <service> command")

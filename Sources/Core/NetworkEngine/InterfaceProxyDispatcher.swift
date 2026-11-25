@@ -286,7 +286,7 @@ public final class InterfaceProxyDispatcher: ProxyDispatcherProtocol, @unchecked
         port: Int,
         assignedInterface: String
     ) async {
-        // Peek at first incoming byte on a GCD worker thread to autodetect protocol
+        ProxySocketIO.setHandshakeTimeouts(fd: clientFd, seconds: 15)
         let firstByteOpt: UInt8? = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 var firstByte: UInt8 = 0

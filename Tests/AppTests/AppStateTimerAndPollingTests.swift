@@ -76,7 +76,24 @@ struct AppStateTimerAndPollingTests {
     @MainActor
     func testClipboardStreamDetection() async {
         let mockClipboard = MockAppClipboardWatcher()
-        let appState = AppState(pasteboardWatcher: mockClipboard, startBackgroundTimers: true)
+        let sensor = NetworkSensor(
+            pathMonitor: MockAppPathMonitor(),
+            interfaceProvider: MockAppInterfaceProvider(interfaces: []),
+            debounceInterval: 0.01,
+            initialState: .disconnected
+        )
+        let appState = AppState(
+            proxyDispatcher: MockAppProxyDispatcher(),
+            vpnController: MockAppVPNController(),
+            downloadManager: MockAppDownloadManager(),
+            campusDoctor: MockAppCampusDoctor(),
+            hotspotController: MockAppHotspotController(),
+            llmBridge: MockAppLLMDoctorBridge(),
+            pasteboardWatcher: mockClipboard,
+            startBackgroundTimers: true,
+            networkSensor: sensor
+        )
+        defer { appState.stopBackgroundTasks() }
 
         let targetURL = URL(string: "https://releases.ubuntu.com/24.04/ubuntu.iso")!
         mockClipboard.emitURL(targetURL)
@@ -86,7 +103,5 @@ struct AppStateTimerAndPollingTests {
 
         #expect(appState.detectedClipboardURL == targetURL)
         #expect(appState.repairLogs.contains(where: { $0.contains("ubuntu.iso") }))
-
-        appState.stopBackgroundTasks()
     }
 }
