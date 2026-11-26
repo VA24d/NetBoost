@@ -36,4 +36,4 @@ jobs:
         run: ./Scripts/build.sh
 
       - name: Run Test Suite
-        run: ./Scripts/run_tests.sh
+        run: ./Scripts/run_tests.sh --no-parallel

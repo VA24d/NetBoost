@@ -86,6 +86,10 @@ public enum NetworkEnvironmentState: Sendable, Equatable, Hashable, Codable {
         return false
     }
 
+    public var isWiredLAN: Bool {
+        isCampusLAN
+    }
+
     public var isCellular: Bool {
         if case .cellularHotspot = self { return true }
         return false

@@ -217,7 +217,7 @@ public struct DashboardView: View {
                 )
 
                 quickControlTile(
-                    title: "Campus Doctor",
+                    title: "Network Doctor",
                     icon: "cross.case",
                     statusText: appState.activeIssues.isEmpty ? "Healthy" : "\(appState.activeIssues.count) \(appState.activeIssues.count == 1 ? "issue" : "issues")",
                     statusColor: appState.activeIssues.isEmpty ? GlassTheme.emeraldGreen : GlassTheme.amberWarning,

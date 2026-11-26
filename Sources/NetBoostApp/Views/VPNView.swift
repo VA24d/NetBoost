@@ -172,7 +172,7 @@ public struct VPNView: View {
                     Text("Auto-switch VPN by network")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(GlassTheme.textPrimary)
-                    Text("Connects on cellular or external Wi-Fi and disengages on campus LAN.")
+                    Text("Connects on cellular or external Wi-Fi and disengages on wired LAN.")
                         .font(.system(size: 11.5))
                         .foregroundColor(GlassTheme.textSecondary)
                 }

@@ -250,11 +250,25 @@ public final class NetworkSensor: @unchecked Sendable {
             return .disconnected
         }
 
-        // 1. Dual-homed priority: Check Wired Ethernet (en10) on Campus LAN (10.1.0.0/16 or 10.8.0.0/16)
-        if let en10 = validInterfaces.first(where: { $0.bsdName == "en10" }),
-           let ip = primaryValidIPv4(for: en10),
-           (ip.hasPrefix("10.1.") || ip.hasPrefix("10.8.")) {
-            return .campusLAN(interface: "en10", ip: ip, gateway: en10.gateway ?? "10.1.36.1", mtu: en10.mtu)
+        // 1. Dual-homed priority: Any active, eligible physical wired Ethernet (en*) adapter ahead of cellular/Wi-Fi
+        let wiredAdapters = validInterfaces.filter { iface in
+            let lowerBSD = iface.bsdName.lowercased()
+            return lowerBSD.hasPrefix("en")
+                && lowerBSD != "en0"
+                && lowerBSD != "en9"
+                && HotspotNATController.isEligibleHotspotInterface(iface.bsdName)
+                && !lowerBSD.hasPrefix("ipsec")
+                && !lowerBSD.hasPrefix("ppp")
+                && !iface.displayName.lowercased().contains("iphone")
+        }.sorted { lhs, rhs in
+            if lhs.isPrimary != rhs.isPrimary { return lhs.isPrimary }
+            if (lhs.bsdName == "en10") != (rhs.bsdName == "en10") { return lhs.bsdName == "en10" }
+            return lhs.bsdName.localizedStandardCompare(rhs.bsdName) == .orderedAscending
+        }
+        if let wired = wiredAdapters.first,
+           let ip = primaryValidIPv4(for: wired) {
+            let fallbackGateway = (ip.hasPrefix("10.1.") || ip.hasPrefix("10.8.")) ? "10.1.36.1" : ""
+            return .campusLAN(interface: wired.bsdName, ip: ip, gateway: wired.gateway ?? fallbackGateway, mtu: wired.mtu)
         }
 
         // 2. Cellular tethering via iPhone USB (en9)

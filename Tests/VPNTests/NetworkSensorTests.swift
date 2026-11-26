@@ -137,6 +137,41 @@ struct NetworkSensorTests {
         #expect(state.primaryInterface == "en10")
     }
 
+    @Test("Any non-10.1.* active wired Ethernet adapter (e.g. en12 on 192.168.50.10) takes priority over en0 Wi-Fi")
+    func testClassifyGenericWiredLANOverWiFi() {
+        let en12 = NetworkInterfaceInfo(
+            bsdName: "en12",
+            displayName: "USB 2.5G LAN",
+            ipAddresses: [IPAddress(address: "192.168.50.10", version: .v4)],
+            gateway: "192.168.50.1",
+            mtu: 1500,
+            isPrimary: false,
+            isUp: true
+        )
+        let en0 = NetworkInterfaceInfo(
+            bsdName: "en0",
+            displayName: "Wi-Fi",
+            ipAddresses: [IPAddress(address: "192.168.1.100", version: .v4)],
+            gateway: "192.168.1.1",
+            mtu: 1500,
+            isPrimary: true,
+            isUp: true
+        )
+
+        let state = NetworkSensor.classify(interfaces: [en0, en12])
+        #expect(state.isWiredLAN == true)
+        #expect(state.isCampusLAN == true)
+        #expect(state.primaryInterface == "en12")
+        if case .campusLAN(let iface, let ip, let gateway, let mtu) = state {
+            #expect(iface == "en12")
+            #expect(ip == "192.168.50.10")
+            #expect(gateway == "192.168.50.1")
+            #expect(mtu == 1500)
+        } else {
+            Issue.record("Expected .campusLAN for active wired en12, got \(state)")
+        }
+    }
+
     @Test("Classify empty interfaces or link-local 169.254.x.x addresses as disconnected")
     func testDisconnectedClassification() {
         #expect(NetworkSensor.classify(interfaces: []) == .disconnected)

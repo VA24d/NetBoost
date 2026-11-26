@@ -26,7 +26,7 @@ struct DNSProxyTests {
 
     @Test("Resolve domain query returns resolved IP and TTL")
     func testResolveDomainQuery() {
-        let proxy = DNSProxy()
+        let proxy = DNSProxy(resolver: MockDNSResolver(returnIP: "10.8.0.80"))
         proxy.start()
         defer { proxy.stop() }
 
@@ -40,7 +40,7 @@ struct DNSProxyTests {
 
     @Test("DNS proxy caches query responses within TTL")
     func testDNSProxyCaching() {
-        let proxy = DNSProxy()
+        let proxy = DNSProxy(resolver: MockDNSResolver(returnIP: "10.8.0.80"))
         proxy.start()
         defer { proxy.stop() }
 

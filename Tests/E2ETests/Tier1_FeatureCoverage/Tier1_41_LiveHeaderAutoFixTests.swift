@@ -8,7 +8,7 @@ struct Tier1_41_LiveHeaderAutoFixTests {
     actor HeaderViewModel {
         private(set) var downloadSpeed: Double = 0
         private(set) var uploadSpeed: Double = 0
-        private(set) var activeStatePill: String = "Campus LAN (10.1.36.52)"
+        private(set) var activeStatePill: String = "Wired LAN (10.1.36.52)"
         private(set) var isRepairRunning: Bool = false
         private(set) var repairSummary: String? = nil
 
@@ -45,7 +45,7 @@ struct Tier1_41_LiveHeaderAutoFixTests {
     func testActiveNetworkStatePill() async {
         let vm = HeaderViewModel()
         var pill = await vm.activeStatePill
-        #expect(pill.contains("Campus LAN"))
+        #expect(pill.contains("Wired LAN"))
 
         await vm.updateNetworkPill(text: "Cellular Hotspot (172.20.10.2)")
         pill = await vm.activeStatePill

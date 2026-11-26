@@ -63,11 +63,11 @@ struct AppStateInitializationTests {
     func testNetworkEnvironmentStateSync() {
         let appState = AppState(startBackgroundTimers: false)
 
-        // Campus LAN
+        // Wired LAN
         appState.updateEnvironment(.defaultCampusLAN)
         #expect(appState.primaryInterface == "en10")
         #expect(appState.primaryInterfaceIP == "10.1.36.52")
-        #expect(appState.activeStatePill == "Campus LAN (Direct)")
+        #expect(appState.activeStatePill == "Wired LAN (Direct)")
 
         // Cellular Hotspot
         appState.updateEnvironment(.defaultCellularHotspot)

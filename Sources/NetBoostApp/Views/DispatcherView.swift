@@ -135,7 +135,7 @@ public struct DispatcherView: View {
                     port: 1080,
                     title: "Ethernet",
                     interfaceName: appState.proxyPorts[1080] ?? "en10",
-                    description: "Wired campus uplink",
+                    description: "Wired LAN uplink",
                     accentColor: GlassTheme.sapphireBlue
                 )
 
@@ -373,7 +373,7 @@ public struct DispatcherView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "pin.fill")
                             .font(.system(size: 11))
-                        Text("Pin Campus Subnets (10.8.0.0/16, 10.4.0.0/16)")
+                        Text("Pin Wired Subnets (10.8.0.0/16, 10.4.0.0/16)")
                             .monospacedDigit()
                     }
                 }

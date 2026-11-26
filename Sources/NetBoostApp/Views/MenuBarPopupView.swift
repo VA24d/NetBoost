@@ -29,6 +29,8 @@ public struct MenuBarPopupView: View {
                 )
             }
 
+            wiredConnectionCard
+
             HStack(spacing: 8) {
                 Text(appState.menuBarThroughputText.isEmpty
                      ? SpeedFormatter.formatMenuBarThroughput(up: appState.smoothedUploadBps, down: appState.smoothedDownloadBps)
@@ -184,6 +186,59 @@ public struct MenuBarPopupView: View {
         .frame(width: 300)
         .preferredColorScheme(.dark)
         .background(VisualEffectBackground(material: .popover, blendingMode: .behindWindow))
+    }
+
+    @ViewBuilder
+    private var wiredConnectionCard: some View {
+        let wired = appState.activeWiredInterface
+        let is8021X = wired.map { appState.dot1XProtectedInterfaces.contains($0.bsdName) } ?? false
+        let badgeText = wired == nil ? "Disconnected" : (is8021X ? "802.1X" : "Connected")
+        let badgeColor: Color = wired == nil
+            ? GlassTheme.textTertiary
+            : (is8021X ? GlassTheme.amberWarning : GlassTheme.emeraldGreen)
+
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: wired == nil ? "cable.connector.slash" : "cable.connector")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundColor(badgeColor)
+
+                Text("Wired Connection")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white)
+
+                Spacer(minLength: 6)
+
+                StatusPill(
+                    text: badgeText,
+                    color: badgeColor,
+                    showPulse: wired != nil && !is8021X
+                )
+            }
+
+            HStack(spacing: 8) {
+                Text(wired.map { "\($0.displayName) · \($0.bsdName)" } ?? "No wired Ethernet detected")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundColor(wired == nil ? GlassTheme.textTertiary : GlassTheme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Spacer(minLength: 6)
+
+                Text(wired?.ipv4Address ?? "—")
+                    .font(.system(size: 11, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundColor(wired == nil ? GlassTheme.textTertiary : GlassTheme.cyanSapphire)
+                    .lineLimit(1)
+            }
+        }
+        .padding(9)
+        .background(GlassTheme.controlFill)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(badgeColor.opacity(wired == nil ? 0.18 : 0.35), lineWidth: 0.75)
+        )
     }
 
     private var menuBarHotspotStatus: String {

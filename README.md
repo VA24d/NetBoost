@@ -2,7 +2,7 @@
 
 <img src="Assets/AppIcon.png" alt="NetBoost icon" width="96" />
 
-NetBoost is a macOS network utility built with Swift 6 and SwiftUI. It shares clean Ethernet or USB uplinks over Wi-Fi. When you plug into campus LAN, it switches split-tunnel OpenVPN automatically. Built-in tools add per-interface proxies, chunked HTTP downloads, and local LAN repairs.
+NetBoost is a macOS network utility built with Swift 6 and SwiftUI. It shares clean Ethernet or USB uplinks over Wi-Fi. When you plug into wired Ethernet, it switches split-tunnel OpenVPN automatically. Built-in tools add per-interface proxies, chunked HTTP downloads, and local LAN repairs.
 
 [![CI](https://github.com/VA24d/NetBoost/actions/workflows/ci.yml/badge.svg)](https://github.com/VA24d/NetBoost/actions/workflows/ci.yml)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC_BY--NC--SA_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
@@ -27,15 +27,15 @@ The Proxy tab runs local SOCKS5 and HTTP CONNECT listeners on ports `1080` to `1
 
 ![NetBoost Proxy dispatcher](Assets/screenshots/dispatcher.png)
 
-### Campus doctor
+### Network doctor
 
-Campus Doctor probes gateway and external RTT, checks for captive portals, sets MTU `1280`, and resets DNS, ARP, and proxy state per service.
+Network Doctor probes gateway and external RTT, checks for captive portals, sets MTU `1280`, and resets DNS, ARP, and proxy state per service.
 
-![NetBoost Campus doctor](Assets/screenshots/doctor.png)
+![NetBoost Network Doctor](Assets/screenshots/doctor.png)
 
 ## Features
 
-Seven tabs inside one window and a menu bar popover cover each network workflow.
+Seven tabs inside one window cover each network workflow. The macOS menu bar item and popover show the live wired LAN interface (`en*`), IPv4 address, and `Connected` or `802.1X` status alongside throughput and quick toggles.
 
 ### Ethernet-to-Wi-Fi sharing
 
@@ -47,15 +47,15 @@ Hotspot mode shares an active Ethernet or USB uplink that has no 802.1X lock ove
 
 ### Context-aware VPN
 
-`NetworkSensor` tracks interface changes using `NWPathMonitor` and `getifaddrs` metadata. On campus Ethernet (`10.1.x.x`), NetBoost drops split-tunnel profiles via `scutil --nc` so tunnel routes do not collide with the local gateway. After switching to cellular tethering or external Wi-Fi, it reconnects `macos.ovpn` or an imported `.ovpn` profile once subnet overlap checks pass.
+`NetworkSensor` tracks interface changes using `NWPathMonitor` and `getifaddrs` metadata. When any wired Ethernet subnet is active, NetBoost drops split-tunnel profiles via `scutil --nc` so tunnel routes do not collide with the local gateway. After switching to cellular tethering or external Wi-Fi, it reconnects `macos.ovpn` or an imported `.ovpn` profile once subnet overlap checks pass.
 
 ### Multi-connection downloader
 
 Single-stream HTTP transfers often hit per-connection rate caps. The downloader checks `Accept-Ranges: bytes`, opens 4 to 16 `URLSession.bytes` chunk workers, and writes segments into `~/Downloads` with locked `FileHandle` seeks. A clipboard watcher picks up copied URLs. `ChecksumValidator` checks SHA-256, SHA-1, or MD5 digests using `CryptoKit`.
 
-### Campus doctor and local AI assistant
+### Network doctor and local AI assistant
 
-Campus Doctor sets MTU `1280` on the chosen service and flushes `dscacheutil` and `mDNSResponder`. Separate controls clear ARP entries, toggle IPv6, reset proxies, and isolate iCloud Private Relay per adapter. You can also run concurrent RTT probes and reorder network services. When LM Studio runs locally at `http://localhost:1234/v1`, the AI tab reads active models from `/v1/models`. It answers questions from telemetry snapshots and waits for your approval before running any suggested tool call.
+Network Doctor sets MTU `1280` on the chosen service and flushes `dscacheutil` and `mDNSResponder`. Separate controls clear ARP entries, toggle IPv6, reset proxies, and isolate iCloud Private Relay per adapter. You can also run concurrent RTT probes and reorder network services. When LM Studio runs locally at `http://localhost:1234/v1`, the AI tab reads active models from `/v1/models`. It answers questions from telemetry snapshots and waits for your approval before running any suggested tool call.
 
 ## First-time privilege setup
 
@@ -113,7 +113,7 @@ Both `build.sh` and `run_tests.sh` detect whether Xcode or standalone Command Li
 
 ## Future plans
 
-Next updates will redraw `Assets/AppIcon.png` to merge the Ethernet and Wi-Fi shapes into one connected vector mark. Release builds will add Developer ID signing, notarization, and `SMAppService` support for Gatekeeper. Campus Doctor will gain broader live telemetry and extra diagnostic checks.
+Release builds will add Developer ID signing, notarization, and `SMAppService` support for Gatekeeper. Network Doctor will gain broader live telemetry and extra diagnostic checks.
 
 ## License
 

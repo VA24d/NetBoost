@@ -45,9 +45,9 @@ Assets/                 AppIcon.png, screenshots/
 
 Scripts/                build.sh, run_tests.sh, package_dmg.sh, netboost-helper.sh,
                         empty.modulemap, empty.swiftoverlay, testing_foundation.modulemap
-Tests/                  AppTests/, CoreTests/, DiagnosticsTests/, DownloaderTests/, LLMBridgeTests/,
-                        MockVerificationTests/, ProxyTests/, VPNTests/, E2ETests/Tier1..Tier5/,
-                        Mocks/, Fixtures/, Helpers/
+Tests/                  AppTests/, CoreTests/, DiagnosticsTests/, DownloaderTests/, HotspotTests/,
+                        LLMBridgeTests/, MockVerificationTests/, ProxyTests/, VPNTests/,
+                        E2ETests/Tier1..Tier5/, Mocks/, Fixtures/, Helpers/
 ```
 
 ## Subsystems
@@ -68,7 +68,7 @@ Tests/                  AppTests/, CoreTests/, DiagnosticsTests/, DownloaderTest
 
 ### VPN automation (`NetworkSensor` and `PassepartoutController`)
 
-`NetworkSensor` merges `NWPathMonitor` callbacks with `getifaddrs` metadata and ignores `bridge100` and hotspot aliases. That classifier detects campus Ethernet, cellular hotspots, external Wi-Fi, or offline state. `VPNRuleEngine`, `PassepartoutController`, and `RouteConflictDetector` control `scutil --nc` services. Imported `.ovpn` files are also checked against physical LAN interfaces for route overlap.
+`NetworkSensor` merges `NWPathMonitor` callbacks with `getifaddrs` metadata and ignores `bridge100` and hotspot aliases. That classifier detects active wired Ethernet, cellular hotspots, external Wi-Fi, or offline state. Rules in `VPNRuleEngine`, `PassepartoutController`, and `RouteConflictDetector` control `scutil --nc` services. Imported `.ovpn` files are also checked against physical LAN interfaces for route overlap.
 
 ### Downloader, diagnostics, and AI bridge
 
@@ -78,4 +78,4 @@ Tests/                  AppTests/, CoreTests/, DiagnosticsTests/, DownloaderTest
 
 ### Desktop UI (`NetBoostApp`)
 
-`MainWindowView` renders a translucent sidebar (`Cmd+1` to `Cmd+7`). In the top bar, `HeaderBarView` shows live throughput and helper status, while `MenuBarPopupView` shows quick toggles. `GlassTheme` sets dark color tokens and a 920 by 600 point minimum frame. Reduced transparency swaps blur layers for solid fills.
+`MainWindowView` renders a translucent sidebar (`Cmd+1` to `Cmd+7`). In the top bar, `HeaderBarView` shows live throughput and helper status. Both the macOS menu bar item and `MenuBarPopupView` display the active wired LAN adapter, IPv4 address, and `802.1X` or `Connected` status alongside quick toggles. Colors and layout metrics in `GlassTheme` enforce a 920 by 600 point minimum frame. Reduced transparency swaps blur layers for solid fills.

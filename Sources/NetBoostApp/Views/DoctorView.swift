@@ -22,9 +22,9 @@ public struct DoctorView: View {
             case "10.1.36.1":
                 return EndpointMeta(host: host, label: "Switch Gateway", role: "Local Switch")
             case "10.8.0.80":
-                return EndpointMeta(host: host, label: "Campus Core", role: "Core Gateway")
+                return EndpointMeta(host: host, label: "Core Gateway", role: "Core Gateway")
             case "turing.iiit.ac.in":
-                return EndpointMeta(host: host, label: "Turing HPC", role: "Campus Cluster")
+                return EndpointMeta(host: host, label: "Turing HPC", role: "Compute Host")
             case "google.com":
                 return EndpointMeta(host: host, label: "Google", role: "External Web")
             case "claude.com":
@@ -60,7 +60,7 @@ public struct DoctorView: View {
     private var headerRow: some View {
         HStack(alignment: .center, spacing: 12) {
             PageHeader(
-                title: "Campus Doctor",
+                title: "Network Doctor",
                 subtitle: "Endpoint latency, captive portal detection, traceroute, and interface repair"
             )
             Spacer()
@@ -307,7 +307,7 @@ public struct DoctorView: View {
                     Text("iCloud Private Relay Isolation")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(GlassTheme.textPrimary)
-                    Text("Bypass Private Relay canary domains on \(appState.selectedRepairService) to prevent campus portal interference.")
+                    Text("Bypass Private Relay canary domains on \(appState.selectedRepairService) to prevent captive portal interference.")
                         .font(.system(size: 11.5))
                         .foregroundColor(GlassTheme.textSecondary)
                 }

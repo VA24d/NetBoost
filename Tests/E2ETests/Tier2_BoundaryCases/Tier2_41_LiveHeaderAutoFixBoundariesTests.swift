@@ -60,14 +60,14 @@ struct Tier2_41_LiveHeaderAutoFixBoundariesTests {
     func testNetworkStatePillLabels() {
         func pillLabel(for state: NetworkEnvironmentState) -> String {
             switch state {
-            case .campusLAN: return "Campus LAN (Direct)"
+            case .campusLAN: return "Wired LAN (Direct)"
             case .cellularHotspot: return "Cellular Hotspot (VPN)"
             case .externalWiFi: return "External Wi-Fi"
             case .disconnected: return "Offline"
             }
         }
 
-        #expect(pillLabel(for: .defaultCampusLAN) == "Campus LAN (Direct)")
+        #expect(pillLabel(for: .defaultCampusLAN) == "Wired LAN (Direct)")
         #expect(pillLabel(for: .defaultCellularHotspot) == "Cellular Hotspot (VPN)")
         #expect(pillLabel(for: .disconnected) == "Offline")
     }

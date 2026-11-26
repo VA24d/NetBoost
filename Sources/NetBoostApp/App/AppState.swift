@@ -35,7 +35,7 @@ public final class AppState: ObservableObject {
     @Published public var activeEnvironment: NetworkEnvironmentState = .defaultCampusLAN
     @Published public var primaryInterface: String = "en10"
     @Published public var primaryInterfaceIP: String = "10.1.36.52"
-    @Published public var activeStatePill: String = "Campus LAN (Direct)"
+    @Published public var activeStatePill: String = "Wired LAN (Direct)"
     @Published public var isAutoFixRunning: Bool = false
     @Published public var autoFixSummary: String? = nil
 
@@ -74,6 +74,72 @@ public final class AppState: ObservableObject {
 
     public var isUpstreamProtectedBy8021X: Bool {
         dot1XProtectedInterfaces.contains(upstreamInterface)
+    }
+
+    public var activeWiredInterface: NetworkInterfaceInfo? {
+        let wiredCandidates = hardwareInterfaces.filter { iface in
+            guard let ip = iface.ipv4Address,
+                  !ip.hasPrefix("169.254."),
+                  !ip.hasPrefix("127.") else {
+                return false
+            }
+            let lower = iface.bsdName.lowercased()
+            let displayLower = iface.displayName.lowercased()
+            return iface.isUp
+                && iface.bsdName != "en0"
+                && iface.bsdName != "en9"
+                && lower.hasPrefix("en")
+                && HotspotNATController.isEligibleHotspotInterface(iface.bsdName)
+                && !displayLower.contains("iphone")
+        }
+        if let upstreamMatch = wiredCandidates.first(where: { $0.bsdName == upstreamInterface }) {
+            return upstreamMatch
+        }
+        if let primaryMatch = wiredCandidates.first(where: { $0.isPrimary }) {
+            return primaryMatch
+        }
+        if let en10Match = wiredCandidates.first(where: { $0.bsdName == "en10" }) {
+            return en10Match
+        }
+        if let firstWired = wiredCandidates.sorted(by: {
+            $0.bsdName.localizedStandardCompare($1.bsdName) == .orderedAscending
+        }).first {
+            return firstWired
+        }
+        if hardwareInterfaces.isEmpty, activeEnvironment.isCampusLAN {
+            let bsd = primaryInterface.isEmpty ? "en10" : primaryInterface
+            let ip = primaryInterfaceIP.isEmpty ? "0.0.0.0" : primaryInterfaceIP
+            return NetworkInterfaceInfo(
+                bsdName: bsd,
+                displayName: "Wired Ethernet",
+                ipAddresses: [IPAddress(address: ip)],
+                isPrimary: true,
+                isUp: true
+            )
+        }
+        return nil
+    }
+
+    public var menuBarWiredLabel: String {
+        activeWiredInterface?.bsdName ?? "No LAN"
+    }
+
+    public var menuBarLabelText: String {
+        let speed = menuBarThroughputText
+        switch menuBarIconStyle {
+        case .iconAndSpeed:
+            let formatted = speed.isEmpty
+                ? SpeedFormatter.formatMenuBarThroughput(up: smoothedUploadBps, down: smoothedDownloadBps)
+                : speed
+            return "\(menuBarWiredLabel) · \(formatted)"
+        case .compactSpeed:
+            let compact = speed.isEmpty
+                ? "↓ \(SpeedFormatter.formatCompact(smoothedDownloadBps)) ↑ \(SpeedFormatter.formatCompact(smoothedUploadBps))"
+                : speed
+            return "\(menuBarWiredLabel) · \(compact)"
+        case .minimalBadge:
+            return activeWiredInterface?.bsdName ?? ""
+        }
     }
 
     public var shareableUpstreamInterfaces: [NetworkInterfaceInfo] {
@@ -367,7 +433,7 @@ public final class AppState: ObservableObject {
         case .campusLAN(let iface, let ip, _, _):
             primaryInterface = iface
             primaryInterfaceIP = ip
-            activeStatePill = "Campus LAN (Direct)"
+            activeStatePill = "Wired LAN (Direct)"
         case .cellularHotspot(let iface, let ip, _, _):
             primaryInterface = iface
             primaryInterfaceIP = ip

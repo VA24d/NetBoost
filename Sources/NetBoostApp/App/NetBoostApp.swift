@@ -60,7 +60,7 @@ public struct NetBoostApp: App {
                     .keyboardShortcut("4", modifiers: .command)
                 Button("Accelerator") { appState.selectedTab = .accelerator }
                     .keyboardShortcut("5", modifiers: .command)
-                Button("Campus Doctor") { appState.selectedTab = .doctor }
+                Button("Network Doctor") { appState.selectedTab = .doctor }
                     .keyboardShortcut("6", modifiers: .command)
                 Button("AI Doctor") { appState.selectedTab = .aiDoctor }
                     .keyboardShortcut("7", modifiers: .command)
@@ -89,20 +89,18 @@ public struct NetBoostApp: App {
             HStack(spacing: 4) {
                 switch appState.menuBarIconStyle {
                 case .iconAndSpeed:
-                    Image(systemName: appState.appLogoStyle.iconName)
-                    if !appState.menuBarThroughputText.isEmpty {
-                        Text(appState.menuBarThroughputText)
-                            .monospacedDigit()
-                    }
+                    Image(systemName: appState.activeWiredInterface != nil ? appState.appLogoStyle.iconName : "cable.connector.slash")
+                    Text(appState.menuBarLabelText)
+                        .monospacedDigit()
                 case .compactSpeed:
-                    if !appState.menuBarThroughputText.isEmpty {
-                        Text(appState.menuBarThroughputText)
-                            .monospacedDigit()
-                    } else {
-                        Image(systemName: appState.appLogoStyle.iconName)
-                    }
+                    Text(appState.menuBarLabelText)
+                        .monospacedDigit()
                 case .minimalBadge:
-                    Image(systemName: appState.appLogoStyle.iconName)
+                    Image(systemName: appState.activeWiredInterface != nil ? appState.appLogoStyle.iconName : "cable.connector.slash")
+                    if let wired = appState.activeWiredInterface {
+                        Text(wired.bsdName)
+                            .monospacedDigit()
+                    }
                 }
             }
         }

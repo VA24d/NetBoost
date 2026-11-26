@@ -8,7 +8,7 @@ public enum AppNavigationTab: String, CaseIterable, Identifiable, Sendable {
     case dispatcher = "Dispatcher"
     case vpn = "VPN & Routing"
     case accelerator = "Accelerator"
-    case doctor = "Campus Doctor"
+    case doctor = "Network Doctor"
     case aiDoctor = "AI Doctor"
 
     public var id: String { rawValue }
@@ -64,17 +64,17 @@ public enum MenuBarIconStyle: String, CaseIterable, Identifiable, Sendable, Coda
 }
 
 public enum AppLogoStyle: String, CaseIterable, Identifiable, Sendable, Codable {
-    case sapphireLightning = "Sapphire Bolt"
-    case liquidWaveform = "Liquid Waveform"
+    case sapphireLightning = "LAN Bridge"
+    case liquidWaveform = "Signal Arcs"
     case networkCore = "Network Core"
 
     public var id: String { rawValue }
 
     public var iconName: String {
         switch self {
-        case .sapphireLightning: return "bolt.horizontal.circle.fill"
-        case .liquidWaveform: return "waveform.path.ecg"
-        case .networkCore: return "network"
+        case .sapphireLightning: return "cable.connector"
+        case .liquidWaveform: return "dot.radiowaves.left.and.right"
+        case .networkCore: return "bolt.horizontal.circle.fill"
         }
     }
 }

@@ -301,7 +301,7 @@ public struct AIDoctorView: View {
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVStack(spacing: 10) {
                         if appState.chatMessages.isEmpty {
-                            Text("Ask about campus Wi-Fi drops, MTU sizing, DNS failures, or route conflicts.")
+                            Text("Ask about Wi-Fi drops, MTU sizing, DNS failures, or route conflicts.")
                                 .font(.system(size: 12))
                                 .foregroundColor(GlassTheme.textTertiary)
                                 .frame(maxWidth: .infinity)
