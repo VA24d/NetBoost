@@ -1,11 +1,13 @@
-# NetBoost
-
-<img src="Assets/AppIcon.png" alt="NetBoost icon" width="96" />
+<div align="center">
+  <img src="Assets/AppIcon.png" alt="NetBoost icon" width="112" />
+  <h1>NetBoost</h1>
+  <p>
+    <a href="https://github.com/VA24d/NetBoost/actions/workflows/ci.yml"><img src="https://github.com/VA24d/NetBoost/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+    <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/"><img src="https://img.shields.io/badge/License-CC_BY--NC--SA_4.0-lightgrey.svg" alt="License: CC BY-NC-SA 4.0" /></a>
+  </p>
+</div>
 
 NetBoost is a macOS network utility built with Swift 6 and SwiftUI. It shares clean Ethernet or USB uplinks over Wi-Fi. When you plug into wired Ethernet, it switches split-tunnel OpenVPN automatically. Built-in tools add per-interface proxies, chunked HTTP downloads, and local LAN repairs.
-
-[![CI](https://github.com/VA24d/NetBoost/actions/workflows/ci.yml/badge.svg)](https://github.com/VA24d/NetBoost/actions/workflows/ci.yml)
-[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC_BY--NC--SA_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
 ## Screenshots
 
