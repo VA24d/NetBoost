@@ -100,7 +100,7 @@ NetBoost/
 
 ## Build and install
 
-Requirements are macOS 27 (Golden Gate), plus Xcode 16+ or Apple Command Line Tools (`Swift 6.0+`). Download `NetBoost-1.0.0.dmg` from [Releases](https://github.com/VA24d/NetBoost/releases) and drag `NetBoost.app` into `/Applications`, or build from source:
+Requirements are macOS 27 (Golden Gate), plus Xcode 16+ or Apple Command Line Tools (`Swift 6.0+`). Download `NetBoost-1.0.1.dmg` from [Releases](https://github.com/VA24d/NetBoost/releases) and drag `NetBoost.app` into `/Applications`, or build from source:
 
 ```bash
 git clone https://github.com/VA24d/NetBoost.git
@@ -108,7 +108,7 @@ cd NetBoost
 
 ./Scripts/build.sh
 ./Scripts/run_tests.sh
-./Scripts/package_dmg.sh --version 1.0.0
+./Scripts/package_dmg.sh --version 1.0.1
 ```
 
 Both `build.sh` and `run_tests.sh` detect whether Xcode or standalone Command Line Tools are active. Under Command Line Tools, they write `.build/vfs.generated.yaml` automatically before invoking `swift`.
